@@ -7,7 +7,7 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `RealESRGAN_x4plus` or `pillow_fallback`.
+2. Let the caller choose `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
 3. Use a deterministic Pillow-based enhancer for local demos and resilience.
 4. Return a catalog-ready JPEG as a data URL.
 
@@ -18,6 +18,12 @@ This keeps product details faithful while still improving clarity, contrast, col
 Real-ESRGAN is primarily a super-resolution/restoration model. It is most visible on low-resolution, compressed, noisy, or slightly blurry uploads. If the source image is already clean and close to the target output size, the difference can be subtle, especially when both images are displayed in the same browser-sized comparison panel.
 
 This project adds a conservative product-image polish after Real-ESRGAN: color-safe autocontrast, light sharpening, and mild tone adjustment. It intentionally avoids heavy generative edits that could change product details.
+
+## Studio Product Mode
+
+`studio_product` is the non-generative catalog-photo mode. It estimates the product mask from the image background, cleans simple backgrounds, places the product on a square studio canvas, adds a soft contact shadow, and applies safe product polish.
+
+It works best when the uploaded product is photographed against a simple background and the product does not touch every image edge. If masking is uncertain, the engine keeps the full image rather than hallucinating product structure.
 
 ## Run Locally
 
@@ -42,7 +48,7 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `realesrgan` or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
 
 ## API
 
@@ -80,6 +86,7 @@ Available presets:
 
 Available engines:
 
+- `studio_product`
 - `realesrgan`
 - `pillow_fallback`
 
@@ -117,4 +124,3 @@ curl -L -o weights/RealESRGAN_x4plus.pth https://github.com/xinntao/Real-ESRGAN/
 ```
 
 For production, run on a CUDA-capable GPU and keep the fallback path enabled for resilience.
->>>>>>> 530832e (Build image enhancement component)

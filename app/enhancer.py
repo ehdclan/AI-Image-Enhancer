@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
 PresetName = Literal["product_standard", "product_detail", "product_soft"]
-EngineName = Literal["realesrgan", "pillow_fallback"]
+EngineName = Literal["realesrgan", "pillow_fallback", "studio_product"]
 
 REALESRGAN_MODEL_PATH = Path(os.getenv("REALESRGAN_MODEL_PATH", "weights/RealESRGAN_x4plus.pth"))
 
@@ -75,6 +75,9 @@ class ProductImageEnhancer:
                 logger.exception("Real-ESRGAN inference failed")
                 raise ModelRuntimeError("Real-ESRGAN failed during inference.") from exc
             engine_label = "RealESRGAN_x4plus"
+        elif engine == "studio_product":
+            enhanced = self._studio_product_enhance(image, preset)
+            engine_label = "Studio product"
         else:
             enhanced = self._fallback_enhance(image, preset)
             engine_label = "Pillow fallback"
@@ -96,6 +99,11 @@ class ProductImageEnhancer:
                 "label": "Pillow fallback",
                 "available": True,
                 "detail": "Ready. Uses deterministic resizing, contrast, denoise, and sharpening.",
+            },
+            "studio_product": {
+                "label": "Studio product",
+                "available": True,
+                "detail": "Ready. Cleans simple backgrounds, centers the product, adds studio shadow, and applies safe polish.",
             },
             "realesrgan": {
                 "label": "Real-ESRGAN x4plus",
@@ -191,12 +199,133 @@ class ProductImageEnhancer:
         image = self._fit_long_edge(image, self.target_long_edge)
         return self._final_polish(image, preset, denoise=True, strength="fallback")
 
+    def _studio_product_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        mask = self._build_product_mask(image)
+        bbox = mask.getbbox()
+
+        if bbox is None:
+            return self._fallback_enhance(image, preset)
+
+        bbox = self._expand_box(bbox, image.size, padding=max(4, round(max(image.size) * 0.015)))
+        product = image.crop(bbox)
+        product_mask = mask.crop(bbox)
+        product = self._final_polish(product, preset, denoise=True, strength="studio")
+
+        product_rgba = product.convert("RGBA")
+        product_rgba.putalpha(product_mask)
+
+        canvas_size = self.target_long_edge
+        product_rgba = self._fit_product_on_canvas(product_rgba, canvas_size)
+        product_alpha = product_rgba.getchannel("A")
+
+        canvas = self._studio_background(canvas_size)
+        product_x = (canvas_size - product_rgba.width) // 2
+        product_y = self._studio_product_y(canvas_size, product_rgba.height)
+
+        shadow = self._build_shadow(product_alpha, canvas_size)
+        shadow_x = (canvas_size - shadow.width) // 2
+        shadow_y = min(
+            canvas_size - shadow.height - max(8, canvas_size // 90),
+            product_y + product_rgba.height - shadow.height // 2,
+        )
+
+        canvas.paste(shadow, (shadow_x, shadow_y), shadow)
+        canvas.paste(product_rgba, (product_x, product_y), product_alpha)
+        return canvas.convert("RGB")
+
+    def _build_product_mask(self, image: Image.Image) -> Image.Image:
+        background = Image.new("RGB", image.size, self._estimate_background_color(image))
+        diff = ImageChops.difference(image, background).convert("L")
+        stats = ImageStat.Stat(diff)
+        threshold = max(18, min(58, round(stats.mean[0] + stats.stddev[0] * 0.75)))
+        mask = diff.point(lambda pixel: 255 if pixel > threshold else 0, mode="L")
+        mask = mask.filter(ImageFilter.MedianFilter(size=5))
+        mask = mask.filter(ImageFilter.MaxFilter(size=9))
+        mask = mask.filter(ImageFilter.MinFilter(size=5))
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=1.1))
+
+        histogram = mask.histogram()
+        coverage = sum(count for value, count in enumerate(histogram) if value > 8) / (image.width * image.height)
+        if coverage < 0.015:
+            return Image.new("L", image.size, 255)
+
+        if coverage > 0.92:
+            return Image.new("L", image.size, 255)
+
+        return mask
+
+    def _estimate_background_color(self, image: Image.Image) -> tuple[int, int, int]:
+        width, height = image.size
+        strip = max(1, round(min(width, height) * 0.04))
+        regions = [
+            image.crop((0, 0, width, strip)),
+            image.crop((0, height - strip, width, height)),
+            image.crop((0, 0, strip, height)),
+            image.crop((width - strip, 0, width, height)),
+        ]
+        colors = [region.resize((1, 1), Image.Resampling.BOX).getpixel((0, 0)) for region in regions]
+        return tuple(round(sum(color[channel] for color in colors) / len(colors)) for channel in range(3))
+
+    def _expand_box(
+        self,
+        box: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+        padding: int,
+    ) -> tuple[int, int, int, int]:
+        left, top, right, bottom = box
+        width, height = image_size
+        return (
+            max(0, left - padding),
+            max(0, top - padding),
+            min(width, right + padding),
+            min(height, bottom + padding),
+        )
+
+    def _fit_product_on_canvas(self, product: Image.Image, canvas_size: int) -> Image.Image:
+        max_width = round(canvas_size * 0.78)
+        max_height = round(canvas_size * 0.76)
+        scale = min(max_width / product.width, max_height / product.height)
+        new_size = (
+            max(1, round(product.width * scale)),
+            max(1, round(product.height * scale)),
+        )
+        return product.resize(new_size, Image.Resampling.LANCZOS)
+
+    def _studio_product_y(self, canvas_size: int, product_height: int) -> int:
+        top_limit = round(canvas_size * 0.08)
+        bottom_limit = canvas_size - product_height - round(canvas_size * 0.13)
+        centered = round((canvas_size - product_height) * 0.46)
+        return max(top_limit, min(centered, bottom_limit))
+
+    def _studio_background(self, size: int) -> Image.Image:
+        top = (250, 251, 249)
+        bottom = (239, 242, 240)
+        strip = Image.new("RGB", (1, size), top)
+        pixels = strip.load()
+
+        for y in range(size):
+            ratio = y / max(1, size - 1)
+            color = tuple(round(top[channel] * (1 - ratio) + bottom[channel] * ratio) for channel in range(3))
+            pixels[0, y] = color
+
+        return strip.resize((size, size), Image.Resampling.BOX)
+
+    def _build_shadow(self, alpha: Image.Image, canvas_size: int) -> Image.Image:
+        shadow_height = max(1, round(alpha.height * 0.18))
+        shadow = alpha.resize((alpha.width, shadow_height), Image.Resampling.LANCZOS)
+        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(12, canvas_size // 45)))
+        shadow = shadow.point(lambda pixel: round(pixel * 0.24))
+
+        shadow_layer = Image.new("RGBA", shadow.size, (18, 22, 20, 0))
+        shadow_layer.putalpha(shadow)
+        return shadow_layer
+
     def _final_polish(
         self,
         image: Image.Image,
         preset: PresetName,
         denoise: bool,
-        strength: Literal["model", "fallback"],
+        strength: Literal["model", "fallback", "studio"],
     ) -> Image.Image:
         image = ImageOps.autocontrast(image, cutoff=1)
 

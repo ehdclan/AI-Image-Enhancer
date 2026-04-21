@@ -45,7 +45,10 @@ const loadEngineStatus = async () => {
     engines = await response.json();
     describeSelectedEngine();
 
-    if (engines.realesrgan?.available) {
+    if (engines.studio_product?.available) {
+      engine.value = "studio_product";
+      describeSelectedEngine();
+    } else if (engines.realesrgan?.available) {
       engine.value = "realesrgan";
       describeSelectedEngine();
     } else {
