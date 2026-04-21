@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Product Image Enhancer</title>
+    <link rel="preconnect" href="https://images.unsplash.com" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace" aria-labelledby="page-title">
+        <div class="intro">
+          <p class="eyebrow">Inventory image enhancement</p>
+          <h1 id="page-title">Upload a product photo. Compare the upgraded version side by side.</h1>
+          <p class="lede">Clean edges, balanced color, sharper detail, and a catalog-ready finish while keeping the item faithful.</p>
+        </div>
+
+        <form class="uploader" id="enhance-form">
+          <label class="dropzone" for="image-input">
+            <input id="image-input" name="image" type="file" accept="image/*" />
+            <span class="dropzone-title">Choose inventory image</span>
+            <span class="dropzone-text">PNG, JPG, WebP, or HEIC export converted by your browser.</span>
+          </label>
+
+          <div class="controls">
+            <label class="field" for="engine-select">
+              <span>Engine</span>
+              <select id="engine-select" name="engine">
+                <option value="realesrgan">Real-ESRGAN</option>
+                <option value="pillow_fallback">Pillow fallback</option>
+              </select>
+            </label>
+            <label class="field" for="preset-select">
+              <span>Enhancement</span>
+              <select id="preset-select" name="preset">
+                <option value="product_standard">Standard</option>
+                <option value="product_detail">More detail</option>
+                <option value="product_soft">Softer finish</option>
+              </select>
+            </label>
+            <button class="button" type="submit" id="enhance-button" disabled>Enhance</button>
+          </div>
+        </form>
+
+        <p class="status" id="status" role="status" aria-live="polite">Waiting for an image.</p>
+        <p class="engine-status" id="engine-status">Checking engines.</p>
+
+        <section class="comparison" aria-label="Image comparison">
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Original</h2>
+              <span id="original-meta">No upload yet</span>
+            </div>
+            <div class="image-stage">
+              <img
+                id="original-preview"
+                class="preview sample"
+                src="https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=80"
+                alt="Sample wristwatch product photo"
+              />
+            </div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-header">
+              <h2>Enhanced</h2>
+              <span id="enhanced-meta">Ready after processing</span>
+            </div>
+            <div class="image-stage">
+              <div class="empty-state" id="enhanced-empty">
+                <span>Enhanced image will appear here.</span>
+              </div>
+              <img id="enhanced-preview" class="preview hidden" alt="Enhanced product result" />
+            </div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
