@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# AI-Image-Enhancer
-=======
 # Product Image Enhancer
 
 A focused image enhancement component for e-commerce inventory photos. It exposes a FastAPI endpoint and a browser UI where an uploaded image appears immediately, then the enhanced result is displayed beside it for comparison.
