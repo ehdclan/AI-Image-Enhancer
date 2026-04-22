@@ -16,6 +16,17 @@ let selectedFile = null;
 let originalObjectUrl = null;
 let engines = {};
 
+const selectedEngineStatus = () => engines[engine.value];
+
+const selectedEngineIsReady = () => {
+  const selected = selectedEngineStatus();
+  return selected ? selected.available : true;
+};
+
+const updateSubmitState = () => {
+  button.disabled = !selectedFile || !selectedEngineIsReady();
+};
+
 const setStatus = (message, isError = false) => {
   status.textContent = message;
   status.style.color = isError ? "#b3261e" : "";
@@ -29,14 +40,16 @@ const formatBytes = (bytes) => {
 };
 
 const describeSelectedEngine = () => {
-  const selected = engines[engine.value];
+  const selected = selectedEngineStatus();
   if (!selected) {
     engineStatus.textContent = "Engine status unavailable.";
+    updateSubmitState();
     return;
   }
 
   const availability = selected.available ? "Ready" : "Not ready";
   engineStatus.textContent = `${selected.label}: ${availability}. ${selected.detail}`;
+  updateSubmitState();
 };
 
 const loadEngineStatus = async () => {
@@ -62,7 +75,7 @@ const loadEngineStatus = async () => {
 
 const setOriginalImage = (file) => {
   selectedFile = file;
-  button.disabled = false;
+  updateSubmitState();
   enhancedPreview.classList.add("hidden");
   enhancedPreview.removeAttribute("src");
   enhancedEmpty.classList.remove("hidden");
@@ -129,6 +142,13 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (!selectedEngineIsReady()) {
+    const selected = selectedEngineStatus();
+    setStatus(selected?.detail || "Selected engine is not ready.", true);
+    updateSubmitState();
+    return;
+  }
+
   const formData = new FormData();
   formData.append("image", selectedFile);
   formData.append("engine", engine.value);
@@ -157,7 +177,7 @@ form.addEventListener("submit", async (event) => {
   } catch (error) {
     setStatus(error.message, true);
   } finally {
-    button.disabled = false;
+    updateSubmitState();
     button.textContent = "Enhance";
   }
 });

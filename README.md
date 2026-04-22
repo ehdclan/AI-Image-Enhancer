@@ -7,7 +7,7 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
+2. Let the caller choose `studio_product_generative`, `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
 3. Use a deterministic Pillow-based enhancer for local demos and resilience.
 4. Return a catalog-ready JPEG as a data URL.
 
@@ -24,6 +24,26 @@ This project adds a conservative product-image polish after Real-ESRGAN: color-s
 `studio_product` is the non-generative catalog-photo mode. It uses rembg segmentation when available, places the product on a square studio canvas, adds a soft contact shadow, and applies safe product polish. The first request may download the rembg `isnet-general-use` segmentation model into `weights/rembg`.
 
 If rembg is unavailable, the app falls back to stricter OpenCV GrabCut masking. If masking is uncertain, the engine keeps a polished full image rather than producing a bad cutout. This avoids changing product structure, but it also means very cluttered photos still need a stronger segmentation or generative stage.
+
+## Studio Product Generative Mode
+
+`studio_product_generative` is the optional controlled generative pass. It first creates the safer `studio_product` image, then sends that result as a reference image to OpenAI image editing with a strict product-preservation prompt. The prompt asks the model to improve studio lighting, background, camera quality, and shadow while preserving product shape, color, labels, logos, printed text, packaging edges, and item count.
+
+Enable it by setting an API key before starting the server:
+
+```bash
+export OPENAI_API_KEY=your_key_here
+```
+
+Optional settings:
+
+```bash
+export OPENAI_IMAGE_MODEL=gpt-image-2
+export OPENAI_IMAGE_SIZE=1024x1024
+export OPENAI_IMAGE_QUALITY=high
+```
+
+This mode can produce a stronger catalog-photo transformation, but it can still alter small label text or fine packaging details. Keep `studio_product` available as the fidelity-first fallback.
 
 ## Run Locally
 
@@ -48,7 +68,7 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
 
 ## API
 
@@ -86,6 +106,7 @@ Available presets:
 
 Available engines:
 
+- `studio_product_generative`
 - `studio_product`
 - `realesrgan`
 - `pillow_fallback`
