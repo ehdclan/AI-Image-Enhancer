@@ -15,7 +15,13 @@ from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOp
 logger = logging.getLogger(__name__)
 
 PresetName = Literal["product_standard", "product_detail", "product_soft"]
-EngineName = Literal["realesrgan", "pillow_fallback", "studio_product", "studio_product_generative"]
+EngineName = Literal[
+    "realesrgan",
+    "pillow_fallback",
+    "studio_product",
+    "studio_product_portrait",
+    "studio_product_generative",
+]
 
 REALESRGAN_MODEL_PATH = Path(os.getenv("REALESRGAN_MODEL_PATH", "weights/RealESRGAN_x4plus.pth"))
 REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
@@ -95,6 +101,9 @@ class ProductImageEnhancer:
         elif engine == "studio_product":
             enhanced = self._studio_product_enhance(image, preset)
             engine_label = "Studio product"
+        elif engine == "studio_product_portrait":
+            enhanced = self._studio_product_portrait_enhance(image, preset)
+            engine_label = "Studio product portrait blur"
         elif engine == "studio_product_generative":
             enhanced = self._studio_product_generative_enhance(image, preset)
             engine_label = f"Studio product generative ({OPENAI_IMAGE_MODEL})"
@@ -124,6 +133,11 @@ class ProductImageEnhancer:
                 "label": "Studio product",
                 "available": True,
                 "detail": self._studio_engine_detail(),
+            },
+            "studio_product_portrait": {
+                "label": "Studio product portrait blur",
+                "available": True,
+                "detail": self._portrait_engine_detail(),
             },
             "studio_product_generative": {
                 "label": "Studio product generative",
@@ -288,6 +302,17 @@ class ProductImageEnhancer:
         canvas.paste(crop, (crop_x, crop_y))
         return canvas.convert("RGB")
 
+    def _studio_product_portrait_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        mask = self._segment_product_mask(image)
+        if mask is None:
+            return self._portrait_scene_without_mask(image, preset)
+
+        focus_mask = self._portrait_focus_mask(mask, image.size)
+        sharp_scene = self._final_polish(image, preset, denoise=True, strength="studio")
+        blurred_scene = self._portrait_blurred_background(image)
+        focused_scene = Image.composite(sharp_scene, blurred_scene, focus_mask)
+        return self._portrait_canvas(focused_scene, blurred_scene)
+
     def _studio_product_generative_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         if not os.getenv("OPENAI_API_KEY"):
             raise ModelUnavailableError("Set OPENAI_API_KEY to use studio_product_generative.")
@@ -320,6 +345,18 @@ class ProductImageEnhancer:
             return "Ready with OpenCV GrabCut segmentation, studio canvas, soft shadow, and safe polish."
 
         return "Ready with basic masking only. Install opencv-python-headless or rembg for stronger product cutouts."
+
+    def _portrait_engine_detail(self) -> str:
+        if importlib.util.find_spec("rembg") is not None:
+            return (
+                f"Ready with rembg {REMBG_MODEL_NAME} focus masking, portrait background blur, "
+                "and safe product polish."
+            )
+
+        if importlib.util.find_spec("cv2") is not None:
+            return "Ready with OpenCV focus masking, portrait background blur, and safe product polish."
+
+        return "Ready with fallback scene blur. Install rembg for stronger foreground focus."
 
     def _is_generative_ready(self) -> bool:
         return bool(os.getenv("OPENAI_API_KEY")) and importlib.util.find_spec("openai") is not None
@@ -630,6 +667,56 @@ class ProductImageEnhancer:
             and stats.coverage <= 0.22
         )
 
+    def _portrait_focus_mask(self, mask: Image.Image, image_size: tuple[int, int]) -> Image.Image:
+        focus = mask.convert("L").point(lambda pixel: 255 if pixel > 24 else 0, mode="L")
+        stats = self._mask_stats(mask, image_size)
+
+        if stats is not None and self._is_undersegmented_tall_product(stats):
+            repair = Image.new("L", image_size, 0)
+            ImageDraw.Draw(repair).rectangle(self._expand_scene_box(stats.bbox, image_size), fill=255)
+            focus = ImageChops.lighter(focus, repair)
+
+        expand_size = self._odd_filter_size(round(min(image_size) * 0.035), minimum=15)
+        focus = focus.filter(ImageFilter.MaxFilter(expand_size))
+        blur_radius = max(8, round(min(image_size) * 0.018))
+        return focus.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    def _portrait_scene_without_mask(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        sharp_scene = self._final_polish(image, preset, denoise=True, strength="studio")
+        blurred_scene = self._portrait_blurred_background(image)
+        focus_mask = self._center_focus_mask(image.size)
+        focused_scene = Image.composite(sharp_scene, blurred_scene, focus_mask)
+        return self._portrait_canvas(focused_scene, blurred_scene)
+
+    def _portrait_blurred_background(self, image: Image.Image) -> Image.Image:
+        blur_radius = max(10, round(min(image.size) * 0.024))
+        background = image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        background = ImageEnhance.Color(background).enhance(0.72)
+        background = ImageEnhance.Contrast(background).enhance(0.9)
+        background = ImageEnhance.Brightness(background).enhance(1.04)
+        return background
+
+    def _portrait_canvas(self, focused_scene: Image.Image, blurred_scene: Image.Image) -> Image.Image:
+        canvas_size = self.target_long_edge
+        canvas = ImageOps.fit(blurred_scene, (canvas_size, canvas_size), method=Image.Resampling.LANCZOS)
+        canvas = canvas.filter(ImageFilter.GaussianBlur(radius=max(6, canvas_size // 120)))
+        canvas = ImageEnhance.Color(canvas).enhance(0.82)
+        canvas = ImageEnhance.Brightness(canvas).enhance(1.03)
+
+        scene = ImageOps.contain(focused_scene, (canvas_size, canvas_size), method=Image.Resampling.LANCZOS)
+        x = (canvas_size - scene.width) // 2
+        y = (canvas_size - scene.height) // 2
+        canvas.paste(scene, (x, y))
+        return canvas.convert("RGB")
+
+    def _center_focus_mask(self, image_size: tuple[int, int]) -> Image.Image:
+        width, height = image_size
+        mask = Image.new("L", image_size, 0)
+        inset_x = round(width * 0.14)
+        inset_y = round(height * 0.12)
+        ImageDraw.Draw(mask).ellipse((inset_x, inset_y, width - inset_x, height - inset_y), fill=255)
+        return mask.filter(ImageFilter.GaussianBlur(radius=max(10, round(min(image_size) * 0.06))))
+
     def _estimate_background_color(self, image: Image.Image) -> tuple[int, int, int]:
         width, height = image.size
         strip = max(1, round(min(width, height) * 0.04))
@@ -674,6 +761,12 @@ class ProductImageEnhancer:
             min(width, right + pad_x),
             min(height, bottom + pad_y),
         )
+
+    def _odd_filter_size(self, value: int, minimum: int) -> int:
+        size = max(minimum, value)
+        if size % 2 == 0:
+            size += 1
+        return size
 
     def _fit_product_on_canvas(self, product: Image.Image, canvas_size: int) -> Image.Image:
         max_width = round(canvas_size * 0.78)

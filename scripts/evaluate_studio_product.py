@@ -28,6 +28,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--target-long-edge", type=int, default=1200)
     parser.add_argument(
+        "--engine",
+        choices=["studio_product", "studio_product_portrait"],
+        default="studio_product",
+    )
+    parser.add_argument(
         "--preset",
         choices=["product_standard", "product_detail", "product_soft"],
         default="product_standard",
@@ -107,9 +112,10 @@ def main() -> None:
                 f"w={stats.bbox_width_ratio:.0%} h={stats.bbox_height_ratio:.0%}"
             )
 
-        result = enhancer.enhance(source_bytes, preset=args.preset, engine="studio_product")
+        result = enhancer.enhance(source_bytes, preset=args.preset, engine=args.engine)
         enhanced = Image.open(io.BytesIO(result.image_bytes)).convert("RGB")
-        output_path = args.output_dir / f"{source_path.stem}-studio.jpg"
+        output_suffix = "portrait" if args.engine == "studio_product_portrait" else "studio"
+        output_path = args.output_dir / f"{source_path.stem}-{output_suffix}.jpg"
         enhanced.save(output_path, quality=92)
 
         rows.append(build_comparison_row(source_path, original, enhanced, mode, mask_label))
