@@ -40,7 +40,6 @@ Optional settings:
 ```bash
 export OPENAI_IMAGE_MODEL=gpt-image-2
 export OPENAI_IMAGE_SIZE=1024x1024
-export OPENAI_IMAGE_QUALITY=high
 ```
 
 This mode can produce a stronger catalog-photo transformation, but it can still alter small label text or fine packaging details. Keep `studio_product` available as the fidelity-first fallback.

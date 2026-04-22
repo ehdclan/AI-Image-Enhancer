@@ -22,7 +22,6 @@ REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
 REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
-OPENAI_IMAGE_QUALITY = os.getenv("OPENAI_IMAGE_QUALITY", "high")
 
 
 @dataclass(frozen=True)
@@ -313,8 +312,6 @@ class ProductImageEnhancer:
             model=OPENAI_IMAGE_MODEL,
             image=reference_file,
             prompt=self._generative_product_prompt(),
-            quality=OPENAI_IMAGE_QUALITY,
-            response_format="b64_json",
             size=OPENAI_IMAGE_SIZE,
         )
 
@@ -445,7 +442,7 @@ class ProductImageEnhancer:
             foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel, iterations=2)
             foreground = cv2.morphologyEx(foreground, cv2.MORPH_OPEN, kernel, iterations=1)
 
-            mask = Image.fromarray(foreground, mode="L")
+            mask = Image.fromarray(foreground)
             if mask.size != image.size:
                 mask = mask.resize(image.size, Image.Resampling.LANCZOS)
             mask = self._clean_product_mask(mask, image.size)
@@ -483,7 +480,7 @@ class ProductImageEnhancer:
         component_count, labels, stats, _ = cv2.connectedComponentsWithStats(hard_mask, 8)
 
         if component_count <= 1:
-            return Image.fromarray((hard_mask * 255).astype("uint8"), mode="L")
+            return Image.fromarray((hard_mask * 255).astype("uint8"))
 
         areas = stats[1:, cv2.CC_STAT_AREA]
         largest_area = int(areas.max()) if len(areas) else 0
@@ -517,7 +514,7 @@ class ProductImageEnhancer:
         cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=1)
         cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
 
-        cleaned_mask = Image.fromarray(cleaned.astype("uint8"), mode="L")
+        cleaned_mask = Image.fromarray(cleaned.astype("uint8"))
         return cleaned_mask.filter(ImageFilter.GaussianBlur(radius=0.9))
 
     def _validate_product_mask(
