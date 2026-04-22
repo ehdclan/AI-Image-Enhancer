@@ -35,6 +35,14 @@ class EnhancementResult:
     preset: PresetName
 
 
+@dataclass(frozen=True)
+class MaskStats:
+    coverage: float
+    bbox: tuple[int, int, int, int]
+    bbox_width_ratio: float
+    bbox_height_ratio: float
+
+
 class ImageEnhancementError(ValueError):
     """Raised when an uploaded file cannot be enhanced safely."""
 
@@ -222,11 +230,14 @@ class ProductImageEnhancer:
         if mask is None:
             return self._fallback_enhance(image, preset)
 
-        bbox = mask.getbbox()
-        if bbox is None:
+        stats = self._mask_stats(mask, image.size)
+        if stats is None:
             return self._fallback_enhance(image, preset)
 
-        bbox = self._expand_box(bbox, image.size, padding=max(4, round(max(image.size) * 0.015)))
+        if self._is_undersegmented_tall_product(stats):
+            return self._studio_scene_crop_enhance(image, stats.bbox, preset)
+
+        bbox = self._expand_box(stats.bbox, image.size, padding=max(4, round(max(image.size) * 0.015)))
         product = image.crop(bbox)
         product_mask = mask.crop(bbox)
         product = self._final_polish(product, preset, denoise=True, strength="studio")
@@ -251,6 +262,30 @@ class ProductImageEnhancer:
 
         canvas.paste(shadow, (shadow_x, shadow_y), shadow)
         canvas.paste(product_rgba, (product_x, product_y), product_alpha)
+        return canvas.convert("RGB")
+
+    def _studio_scene_crop_enhance(
+        self,
+        image: Image.Image,
+        bbox: tuple[int, int, int, int],
+        preset: PresetName,
+    ) -> Image.Image:
+        crop_box = self._expand_scene_box(bbox, image.size)
+        crop = image.crop(crop_box)
+        crop = self._final_polish(crop, preset, denoise=True, strength="studio")
+
+        canvas_size = self.target_long_edge
+        background = ImageOps.fit(crop, (canvas_size, canvas_size), method=Image.Resampling.LANCZOS)
+        background = background.filter(ImageFilter.GaussianBlur(radius=max(14, canvas_size // 55)))
+        background = ImageEnhance.Color(background).enhance(0.25)
+        background = ImageEnhance.Brightness(background).enhance(1.15)
+        canvas = Image.blend(background, self._studio_background(canvas_size), 0.78)
+
+        max_crop_size = round(canvas_size * 0.9)
+        crop = ImageOps.contain(crop, (max_crop_size, max_crop_size), method=Image.Resampling.LANCZOS)
+        crop_x = (canvas_size - crop.width) // 2
+        crop_y = (canvas_size - crop.height) // 2
+        canvas.paste(crop, (crop_x, crop_y))
         return canvas.convert("RGB")
 
     def _studio_product_generative_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
@@ -570,6 +605,31 @@ class ProductImageEnhancer:
 
         return mask
 
+    def _mask_stats(self, mask: Image.Image, image_size: tuple[int, int]) -> Optional[MaskStats]:
+        histogram = mask.histogram()
+        total_pixels = image_size[0] * image_size[1]
+        coverage = sum(count for value, count in enumerate(histogram) if value > 24) / total_pixels
+        hard_mask = mask.point(lambda pixel: 255 if pixel > 24 else 0, mode="L")
+        bbox = hard_mask.getbbox()
+        if bbox is None:
+            return None
+
+        box_width = bbox[2] - bbox[0]
+        box_height = bbox[3] - bbox[1]
+        return MaskStats(
+            coverage=coverage,
+            bbox=bbox,
+            bbox_width_ratio=box_width / image_size[0],
+            bbox_height_ratio=box_height / image_size[1],
+        )
+
+    def _is_undersegmented_tall_product(self, stats: MaskStats) -> bool:
+        return (
+            stats.bbox_height_ratio >= 0.78
+            and stats.bbox_width_ratio <= 0.42
+            and stats.coverage <= 0.22
+        )
+
     def _estimate_background_color(self, image: Image.Image) -> tuple[int, int, int]:
         width, height = image.size
         strip = max(1, round(min(width, height) * 0.04))
@@ -595,6 +655,24 @@ class ProductImageEnhancer:
             max(0, top - padding),
             min(width, right + padding),
             min(height, bottom + padding),
+        )
+
+    def _expand_scene_box(
+        self,
+        box: tuple[int, int, int, int],
+        image_size: tuple[int, int],
+    ) -> tuple[int, int, int, int]:
+        left, top, right, bottom = box
+        width, height = image_size
+        box_width = right - left
+        box_height = bottom - top
+        pad_x = max(round(box_width * 0.65), round(width * 0.08), 8)
+        pad_y = max(round(box_height * 0.06), round(height * 0.03), 8)
+        return (
+            max(0, left - pad_x),
+            max(0, top - pad_y),
+            min(width, right + pad_x),
+            min(height, bottom + pad_y),
         )
 
     def _fit_product_on_canvas(self, product: Image.Image, canvas_size: int) -> Image.Image:

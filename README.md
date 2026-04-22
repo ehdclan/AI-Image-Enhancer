@@ -23,7 +23,17 @@ This project adds a conservative product-image polish after Real-ESRGAN: color-s
 
 `studio_product` is the non-generative catalog-photo mode. It uses rembg segmentation when available, places the product on a square studio canvas, adds a soft contact shadow, and applies safe product polish. The first request may download the rembg `isnet-general-use` segmentation model into `weights/rembg`.
 
-If rembg is unavailable, the app falls back to stricter OpenCV GrabCut masking. If masking is uncertain, the engine keeps a polished full image rather than producing a bad cutout. This avoids changing product structure, but it also means very cluttered photos still need a stronger segmentation or generative stage.
+If rembg is unavailable, the app falls back to stricter OpenCV GrabCut masking. If masking is uncertain, the engine keeps a polished full image rather than producing a bad cutout. For tall apparel images where segmentation is likely cutting away part of the garment, it switches to a safer framed studio crop so the product is preserved.
+
+`studio_product` is not a trainable model yet; it is a deterministic pipeline. Real store images are still useful because they reveal failure cases and let us tune the masking and fallback rules.
+
+Batch-check local store images with:
+
+```bash
+python scripts/evaluate_studio_product.py "ALATPay Store Images" --output-dir outputs/alatpay_studio_eval
+```
+
+The script writes enhanced outputs and `comparison_sheet.jpg` for quick visual review. Local store-image folders and generated outputs are ignored by git.
 
 ## Studio Product Generative Mode
 
