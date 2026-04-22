@@ -21,9 +21,9 @@ This project adds a conservative product-image polish after Real-ESRGAN: color-s
 
 ## Studio Product Mode
 
-`studio_product` is the non-generative catalog-photo mode. It estimates the product mask from the image background, cleans simple backgrounds, places the product on a square studio canvas, adds a soft contact shadow, and applies safe product polish.
+`studio_product` is the non-generative catalog-photo mode. It uses rembg segmentation when available, places the product on a square studio canvas, adds a soft contact shadow, and applies safe product polish. The first request may download the rembg `isnet-general-use` segmentation model into `weights/rembg`.
 
-It works best when the uploaded product is photographed against a simple background and the product does not touch every image edge. If masking is uncertain, the engine keeps the full image rather than hallucinating product structure.
+If rembg is unavailable, the app falls back to stricter OpenCV GrabCut masking. If masking is uncertain, the engine keeps a polished full image rather than producing a bad cutout. This avoids changing product structure, but it also means very cluttered photos still need a stronger segmentation or generative stage.
 
 ## Run Locally
 

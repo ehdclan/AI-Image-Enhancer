@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import io
+import importlib.util
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
-from PIL import Image, ImageChops, ImageEnhance, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,8 @@ PresetName = Literal["product_standard", "product_detail", "product_soft"]
 EngineName = Literal["realesrgan", "pillow_fallback", "studio_product"]
 
 REALESRGAN_MODEL_PATH = Path(os.getenv("REALESRGAN_MODEL_PATH", "weights/RealESRGAN_x4plus.pth"))
+REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
+REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,8 @@ class ProductImageEnhancer:
         self.target_long_edge = target_long_edge
         self._realesrgan_status = "Checking Real-ESRGAN runtime."
         self._realesrgan = self._load_realesrgan()
+        self._rembg_session = None
+        self._rembg_session_model: Optional[str] = None
 
     def enhance(
         self,
@@ -103,7 +108,7 @@ class ProductImageEnhancer:
             "studio_product": {
                 "label": "Studio product",
                 "available": True,
-                "detail": "Ready. Cleans simple backgrounds, centers the product, adds studio shadow, and applies safe polish.",
+                "detail": self._studio_engine_detail(),
             },
             "realesrgan": {
                 "label": "Real-ESRGAN x4plus",
@@ -200,9 +205,11 @@ class ProductImageEnhancer:
         return self._final_polish(image, preset, denoise=True, strength="fallback")
 
     def _studio_product_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
-        mask = self._build_product_mask(image)
-        bbox = mask.getbbox()
+        mask = self._segment_product_mask(image)
+        if mask is None:
+            return self._fallback_enhance(image, preset)
 
+        bbox = mask.getbbox()
         if bbox is None:
             return self._fallback_enhance(image, preset)
 
@@ -233,7 +240,127 @@ class ProductImageEnhancer:
         canvas.paste(product_rgba, (product_x, product_y), product_alpha)
         return canvas.convert("RGB")
 
-    def _build_product_mask(self, image: Image.Image) -> Image.Image:
+    def _studio_engine_detail(self) -> str:
+        if importlib.util.find_spec("rembg") is not None:
+            return (
+                f"Ready with rembg {REMBG_MODEL_NAME} segmentation, studio canvas, "
+                "soft shadow, and safe polish."
+            )
+
+        if importlib.util.find_spec("cv2") is not None:
+            return "Ready with OpenCV GrabCut segmentation, studio canvas, soft shadow, and safe polish."
+
+        return "Ready with basic masking only. Install opencv-python-headless or rembg for stronger product cutouts."
+
+    def _segment_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
+        mask = self._build_rembg_product_mask(image)
+        if mask is not None:
+            return mask
+
+        mask = self._build_grabcut_product_mask(image)
+        if mask is not None:
+            return mask
+
+        return self._build_heuristic_product_mask(image)
+
+    def _build_rembg_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
+        try:
+            from rembg import new_session, remove
+        except Exception:
+            return None
+
+        try:
+            REMBG_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            os.environ.setdefault("U2NET_HOME", str(REMBG_MODEL_DIR.resolve()))
+
+            if self._rembg_session is None or self._rembg_session_model != REMBG_MODEL_NAME:
+                self._rembg_session = new_session(REMBG_MODEL_NAME, providers=["CPUExecutionProvider"])
+                self._rembg_session_model = REMBG_MODEL_NAME
+
+            output = remove(image, session=self._rembg_session, post_process_mask=True)
+            if output.mode != "RGBA":
+                output = output.convert("RGBA")
+
+            mask = self._clean_product_mask(output.getchannel("A"), image.size)
+            return self._validate_product_mask(mask, image.size, allow_border_touch=True)
+        except Exception as exc:
+            logger.info("rembg segmentation failed; falling back: %s", exc)
+            return None
+
+    def _build_grabcut_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
+        try:
+            import cv2
+            import numpy as np
+        except Exception:
+            return None
+
+        try:
+            max_side = 900
+            scale = min(1.0, max_side / max(image.size))
+            work = image
+            if scale < 1.0:
+                work = image.resize(
+                    (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
+
+            rgb = np.array(work)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            height, width = bgr.shape[:2]
+            gc_mask = np.full((height, width), cv2.GC_PR_BGD, dtype=np.uint8)
+
+            border_x = max(3, round(width * 0.035))
+            border_y = max(3, round(height * 0.035))
+            gc_mask[:border_y, :] = cv2.GC_BGD
+            gc_mask[height - border_y :, :] = cv2.GC_BGD
+            gc_mask[:, :border_x] = cv2.GC_BGD
+            gc_mask[:, width - border_x :] = cv2.GC_BGD
+
+            heuristic = self._build_heuristic_product_mask(work)
+            if heuristic is not None:
+                heuristic_array = np.array(heuristic)
+                probable_foreground = heuristic_array > 48
+                strong_foreground = heuristic_array > 220
+                gc_mask[probable_foreground] = cv2.GC_PR_FGD
+                gc_mask[strong_foreground] = cv2.GC_FGD
+                mode = cv2.GC_INIT_WITH_MASK
+                rect = (0, 0, 1, 1)
+            else:
+                rect = (
+                    max(1, round(width * 0.05)),
+                    max(1, round(height * 0.05)),
+                    max(2, round(width * 0.9)),
+                    max(2, round(height * 0.9)),
+                )
+                mode = cv2.GC_INIT_WITH_RECT
+
+            bgd_model = np.zeros((1, 65), np.float64)
+            fgd_model = np.zeros((1, 65), np.float64)
+            cv2.grabCut(bgr, gc_mask, rect, bgd_model, fgd_model, 5, mode)
+
+            foreground = np.where(
+                (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD),
+                255,
+                0,
+            ).astype("uint8")
+
+            kernel_size = max(3, round(min(width, height) * 0.01))
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+            foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel, iterations=2)
+            foreground = cv2.morphologyEx(foreground, cv2.MORPH_OPEN, kernel, iterations=1)
+
+            mask = Image.fromarray(foreground, mode="L")
+            if mask.size != image.size:
+                mask = mask.resize(image.size, Image.Resampling.LANCZOS)
+            mask = self._clean_product_mask(mask, image.size)
+            return self._validate_product_mask(mask, image.size, allow_border_touch=False)
+        except Exception as exc:
+            logger.info("OpenCV GrabCut segmentation failed; falling back: %s", exc)
+            return None
+
+    def _build_heuristic_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
         background = Image.new("RGB", image.size, self._estimate_background_color(image))
         diff = ImageChops.difference(image, background).convert("L")
         stats = ImageStat.Stat(diff)
@@ -244,13 +371,111 @@ class ProductImageEnhancer:
         mask = mask.filter(ImageFilter.MinFilter(size=5))
         mask = mask.filter(ImageFilter.GaussianBlur(radius=1.1))
 
-        histogram = mask.histogram()
-        coverage = sum(count for value, count in enumerate(histogram) if value > 8) / (image.width * image.height)
-        if coverage < 0.015:
-            return Image.new("L", image.size, 255)
+        return self._validate_product_mask(mask, image.size, allow_border_touch=False)
 
-        if coverage > 0.92:
-            return Image.new("L", image.size, 255)
+    def _clean_product_mask(
+        self,
+        mask: Image.Image,
+        image_size: tuple[int, int],
+    ) -> Image.Image:
+        try:
+            import cv2
+            import numpy as np
+        except Exception:
+            return mask.convert("L").filter(ImageFilter.GaussianBlur(radius=0.8))
+
+        mask_array = np.array(mask.convert("L"))
+        hard_mask = (mask_array > 32).astype("uint8")
+        component_count, labels, stats, _ = cv2.connectedComponentsWithStats(hard_mask, 8)
+
+        if component_count <= 1:
+            return Image.fromarray((hard_mask * 255).astype("uint8"), mode="L")
+
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        largest_area = int(areas.max()) if len(areas) else 0
+        min_area = max(round(image_size[0] * image_size[1] * 0.003), round(largest_area * 0.08), 24)
+        cleaned = np.zeros_like(hard_mask)
+
+        for label in range(1, component_count):
+            left = stats[label, cv2.CC_STAT_LEFT]
+            top = stats[label, cv2.CC_STAT_TOP]
+            width = stats[label, cv2.CC_STAT_WIDTH]
+            height = stats[label, cv2.CC_STAT_HEIGHT]
+            area = stats[label, cv2.CC_STAT_AREA]
+            right = left + width
+            bottom = top + height
+
+            touches_border = left <= 1 or top <= 1 or right >= image_size[0] - 1 or bottom >= image_size[1] - 1
+            if area < min_area:
+                continue
+            if touches_border and area < largest_area * 0.65:
+                continue
+
+            cleaned[labels == label] = 255
+
+        if not cleaned.any():
+            cleaned[labels == int(areas.argmax()) + 1] = 255
+
+        kernel_size = max(3, round(min(image_size) * 0.004))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel, iterations=1)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        cleaned_mask = Image.fromarray(cleaned.astype("uint8"), mode="L")
+        return cleaned_mask.filter(ImageFilter.GaussianBlur(radius=0.9))
+
+    def _validate_product_mask(
+        self,
+        mask: Image.Image,
+        image_size: tuple[int, int],
+        allow_border_touch: bool,
+    ) -> Optional[Image.Image]:
+        mask = mask.convert("L").filter(ImageFilter.GaussianBlur(radius=0.6))
+        histogram = mask.histogram()
+        total_pixels = image_size[0] * image_size[1]
+        coverage = sum(count for value, count in enumerate(histogram) if value > 24) / total_pixels
+
+        if coverage < 0.02 or coverage > 0.88:
+            return None
+
+        hard_mask = mask.point(lambda pixel: 255 if pixel > 24 else 0, mode="L")
+        bbox = hard_mask.getbbox()
+        if bbox is None:
+            return None
+
+        box_width = bbox[2] - bbox[0]
+        box_height = bbox[3] - bbox[1]
+        if box_width >= image_size[0] * 0.98 and box_height >= image_size[1] * 0.98:
+            return None
+
+        bbox_area_ratio = (box_width * box_height) / total_pixels
+        if not allow_border_touch and box_width > image_size[0] * 0.75 and box_height > image_size[1] * 0.75:
+            if coverage < 0.45 and bbox_area_ratio > 0.55:
+                return None
+
+        if not allow_border_touch:
+            border = max(2, round(min(image_size) * 0.025))
+            top_band = hard_mask.crop((0, 0, image_size[0], border))
+            bottom_band = hard_mask.crop((0, image_size[1] - border, image_size[0], image_size[1]))
+            left_band = hard_mask.crop((0, 0, border, image_size[1]))
+            right_band = hard_mask.crop((image_size[0] - border, 0, image_size[0], image_size[1]))
+            border_pixels = sum(1 for band in (top_band, bottom_band, left_band, right_band) for pixel in band.getdata() if pixel)
+            border_area = (top_band.width * top_band.height) + (bottom_band.width * bottom_band.height)
+            border_area += (left_band.width * left_band.height) + (right_band.width * right_band.height)
+            border_coverage = border_pixels / max(1, border_area)
+            edge_hits = sum(
+                [
+                    bbox[0] <= border,
+                    bbox[1] <= border,
+                    bbox[2] >= image_size[0] - border,
+                    bbox[3] >= image_size[1] - border,
+                ]
+            )
+
+            if edge_hits >= 2 and (coverage > 0.18 or border_coverage > 0.08):
+                return None
 
         return mask
 
@@ -311,10 +536,15 @@ class ProductImageEnhancer:
         return strip.resize((size, size), Image.Resampling.BOX)
 
     def _build_shadow(self, alpha: Image.Image, canvas_size: int) -> Image.Image:
-        shadow_height = max(1, round(alpha.height * 0.18))
-        shadow = alpha.resize((alpha.width, shadow_height), Image.Resampling.LANCZOS)
-        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(12, canvas_size // 45)))
-        shadow = shadow.point(lambda pixel: round(pixel * 0.24))
+        shadow_width = max(1, round(alpha.width * 0.9))
+        shadow_height = max(18, round(canvas_size * 0.055))
+        shadow = Image.new("L", (shadow_width, shadow_height), 0)
+        draw = ImageDraw.Draw(shadow)
+        inset_x = max(1, round(shadow_width * 0.08))
+        inset_y = max(1, round(shadow_height * 0.22))
+        draw.ellipse((inset_x, inset_y, shadow_width - inset_x, shadow_height - inset_y), fill=255)
+        shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(10, canvas_size // 70)))
+        shadow = shadow.point(lambda pixel: round(pixel * 0.20))
 
         shadow_layer = Image.new("RGBA", shadow.size, (18, 22, 20, 0))
         shadow_layer.putalpha(shadow)
