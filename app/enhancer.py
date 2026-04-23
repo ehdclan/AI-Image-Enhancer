@@ -22,21 +22,12 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except ValueError:
-        return default
-
-
 PresetName = Literal["product_standard", "product_detail", "product_soft"]
 EngineName = Literal[
     "realesrgan",
     "pillow_fallback",
     "studio_product",
     "studio_product_focus",
-    "studio_product_flux",
-    "studio_product_flux_4bit",
     "studio_product_generative",
 ]
 
@@ -45,14 +36,6 @@ REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
 REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
-FLUX_MODEL_ID = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-schnell")
-FLUX_4BIT_MODEL_ID = os.getenv("FLUX_4BIT_MODEL_ID", "magespace/FLUX.1-schnell-bnb-nf4")
-FLUX_IMAGE_SIZE = _env_int("FLUX_IMAGE_SIZE", 768)
-FLUX_4BIT_IMAGE_SIZE = _env_int("FLUX_4BIT_IMAGE_SIZE", 768)
-FLUX_NUM_INFERENCE_STEPS = _env_int("FLUX_NUM_INFERENCE_STEPS", 4)
-FLUX_STRENGTH = _env_float("FLUX_STRENGTH", 0.55)
-FLUX_GUIDANCE_SCALE = _env_float("FLUX_GUIDANCE_SCALE", 0.0)
-FLUX_SEED = _env_int("FLUX_SEED", 0)
 MAX_OUTPUT_LONG_EDGE = _env_int("MAX_OUTPUT_LONG_EDGE", 4096)
 
 
@@ -106,8 +89,6 @@ class ProductImageEnhancer:
         self.max_output_long_edge = max(self.target_long_edge, max_output_long_edge)
         self._realesrgan_status = "Checking Real-ESRGAN runtime."
         self._realesrgan = self._load_realesrgan()
-        self._flux_pipe = None
-        self._flux_4bit_pipe = None
         self._rembg_session = None
         self._rembg_session_model: Optional[str] = None
 
@@ -138,12 +119,6 @@ class ProductImageEnhancer:
         elif engine == "studio_product_focus":
             enhanced = self._studio_product_focus_enhance(image, preset)
             engine_label = "Studio product focus"
-        elif engine == "studio_product_flux":
-            enhanced = self._studio_product_flux_enhance(image, preset)
-            engine_label = f"Studio product Flux ({FLUX_MODEL_ID})"
-        elif engine == "studio_product_flux_4bit":
-            enhanced = self._studio_product_flux_4bit_enhance(image, preset)
-            engine_label = f"Studio product Flux 4-bit ({FLUX_4BIT_MODEL_ID})"
         elif engine == "studio_product_generative":
             enhanced = self._studio_product_generative_enhance(image, preset)
             engine_label = f"Studio product generative ({OPENAI_IMAGE_MODEL})"
@@ -178,18 +153,6 @@ class ProductImageEnhancer:
                 "label": "Studio product focus",
                 "available": True,
                 "detail": self._focus_engine_detail(),
-            },
-            "studio_product_flux": {
-                "label": "Studio product Flux",
-                "available": self._is_flux_ready(),
-                "detail": self._flux_engine_detail(),
-                "model": FLUX_MODEL_ID,
-            },
-            "studio_product_flux_4bit": {
-                "label": "Studio product Flux 4-bit",
-                "available": self._is_flux_4bit_ready(),
-                "detail": self._flux_4bit_engine_detail(),
-                "model": FLUX_4BIT_MODEL_ID,
             },
             "studio_product_generative": {
                 "label": "Studio product generative",
@@ -300,7 +263,7 @@ class ProductImageEnhancer:
         if stats is None:
             return self._fallback_enhance(image, preset)
 
-        if self._is_undersegmented_tall_product(stats):
+        if self._should_use_scene_crop(stats, image.size):
             return self._studio_scene_crop_enhance(image, stats.bbox, preset)
 
         bbox = self._expand_box(stats.bbox, image.size, padding=max(4, round(max(image.size) * 0.015)))
@@ -351,7 +314,8 @@ class ProductImageEnhancer:
         crop = ImageOps.contain(crop, (max_crop_size, max_crop_size), method=Image.Resampling.LANCZOS)
         crop_x = (canvas_size - crop.width) // 2
         crop_y = (canvas_size - crop.height) // 2
-        canvas.paste(crop, (crop_x, crop_y))
+        crop_mask = self._soft_scene_crop_mask(crop.size)
+        canvas.paste(crop, (crop_x, crop_y), crop_mask)
         return canvas.convert("RGB")
 
     def _studio_product_focus_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
@@ -363,49 +327,6 @@ class ProductImageEnhancer:
         product_scene = self._final_polish(image, preset, denoise=True, strength="studio")
         focused_scene = Image.composite(product_scene, image, focus_mask)
         return self._fit_long_edge(focused_scene.convert("RGB"), self._output_long_edge_for(image))
-
-    def _studio_product_flux_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
-        pipe = self._load_flux_pipeline()
-        return self._enhance_with_flux_pipeline(image, preset, pipe, self._flux_image_size())
-
-    def _studio_product_flux_4bit_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
-        pipe = self._load_flux_4bit_pipeline()
-        return self._enhance_with_flux_pipeline(image, preset, pipe, self._flux_4bit_image_size())
-
-    def _enhance_with_flux_pipeline(
-        self,
-        image: Image.Image,
-        preset: PresetName,
-        pipe,
-        image_size: int,
-    ) -> Image.Image:
-        reference = self._studio_product_enhance(image, preset)
-        reference = self._prepare_flux_reference(reference, image_size)
-
-        try:
-            import torch
-
-            generator = torch.Generator("cpu").manual_seed(FLUX_SEED) if FLUX_SEED >= 0 else None
-            result = pipe(
-                prompt=self._generative_product_prompt(),
-                image=reference,
-                height=reference.height,
-                width=reference.width,
-                strength=max(0.0, min(1.0, FLUX_STRENGTH)),
-                guidance_scale=FLUX_GUIDANCE_SCALE,
-                num_inference_steps=max(1, FLUX_NUM_INFERENCE_STEPS),
-                max_sequence_length=256,
-                generator=generator,
-            )
-        except ModelUnavailableError:
-            raise
-        except Exception as exc:  # pragma: no cover - optional GPU runtime is deployment-specific
-            logger.exception("Flux image-to-image inference failed")
-            raise ModelRuntimeError("Flux image-to-image enhancement failed during inference.") from exc
-
-        generated = result.images[0].convert("RGB")
-        generated = self._fit_long_edge(generated, self._output_long_edge_for(image))
-        return self._final_polish(generated, preset, denoise=False, strength="model")
 
     def _studio_product_generative_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         if not os.getenv("OPENAI_API_KEY"):
@@ -451,144 +372,6 @@ class ProductImageEnhancer:
             return "Ready with OpenCV focus masking. Keeps the original background and enhances the product area."
 
         return "Ready with full-scene fallback polish. Install rembg for product-only focus."
-
-    def _is_flux_ready(self) -> bool:
-        if importlib.util.find_spec("diffusers") is None or importlib.util.find_spec("torch") is None:
-            return False
-
-        try:
-            import torch
-
-            return torch.cuda.is_available()
-        except Exception:
-            return False
-
-    def _is_flux_4bit_ready(self) -> bool:
-        if (
-            importlib.util.find_spec("diffusers") is None
-            or importlib.util.find_spec("torch") is None
-            or importlib.util.find_spec("bitsandbytes") is None
-        ):
-            return False
-
-        try:
-            import torch
-
-            return torch.cuda.is_available()
-        except Exception:
-            return False
-
-    def _flux_engine_detail(self) -> str:
-        if importlib.util.find_spec("diffusers") is None:
-            return "Not ready. Install the optional Flux dependencies from requirements-flux.txt."
-
-        if importlib.util.find_spec("torch") is None:
-            return "Not ready. Install PyTorch with CUDA support."
-
-        try:
-            import torch
-        except Exception:
-            return "Not ready. PyTorch could not be imported."
-
-        if not torch.cuda.is_available():
-            return "Not ready. Flux needs a CUDA GPU; use a Colab GPU runtime for testing."
-
-        return (
-            f"Ready with {FLUX_MODEL_ID}. Uses Flux image-to-image after studio_product with "
-            f"size={self._flux_image_size()}, steps={max(1, FLUX_NUM_INFERENCE_STEPS)}, "
-            f"strength={max(0.0, min(1.0, FLUX_STRENGTH))}."
-        )
-
-    def _flux_4bit_engine_detail(self) -> str:
-        if importlib.util.find_spec("diffusers") is None:
-            return "Not ready. Install the optional Flux dependencies from requirements-flux.txt."
-
-        if importlib.util.find_spec("bitsandbytes") is None:
-            return "Not ready. Install bitsandbytes from requirements-flux.txt for the 4-bit Flux engine."
-
-        if importlib.util.find_spec("torch") is None:
-            return "Not ready. Install PyTorch with CUDA support."
-
-        try:
-            import torch
-        except Exception:
-            return "Not ready. PyTorch could not be imported."
-
-        if not torch.cuda.is_available():
-            return "Not ready. Flux 4-bit needs a CUDA GPU; use a Colab GPU runtime for testing."
-
-        return (
-            f"Ready with compact {FLUX_4BIT_MODEL_ID}. Uses pre-quantized Flux image-to-image after "
-            f"studio_product with size={self._flux_4bit_image_size()}, "
-            f"steps={max(1, FLUX_NUM_INFERENCE_STEPS)}, strength={max(0.0, min(1.0, FLUX_STRENGTH))}."
-        )
-
-    def _load_flux_pipeline(self):
-        if importlib.util.find_spec("diffusers") is None:
-            raise ModelUnavailableError("Install the optional Flux dependencies from requirements-flux.txt.")
-
-        if importlib.util.find_spec("torch") is None:
-            raise ModelUnavailableError("Install PyTorch with CUDA support to use studio_product_flux.")
-
-        import torch
-        from diffusers import FluxImg2ImgPipeline
-
-        if not torch.cuda.is_available():
-            raise ModelUnavailableError("studio_product_flux needs a CUDA GPU. Use a Colab GPU runtime.")
-
-        if self._flux_pipe is not None:
-            return self._flux_pipe
-
-        dtype = self._flux_dtype(torch)
-        pipe = FluxImg2ImgPipeline.from_pretrained(
-            FLUX_MODEL_ID,
-            torch_dtype=dtype,
-            token=self._huggingface_token(),
-        )
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to("cuda")
-
-        self._flux_pipe = pipe
-        return self._flux_pipe
-
-    def _load_flux_4bit_pipeline(self):
-        if importlib.util.find_spec("diffusers") is None:
-            raise ModelUnavailableError("Install the optional Flux dependencies from requirements-flux.txt.")
-
-        if importlib.util.find_spec("bitsandbytes") is None:
-            raise ModelUnavailableError("Install bitsandbytes from requirements-flux.txt to use studio_product_flux_4bit.")
-
-        if importlib.util.find_spec("torch") is None:
-            raise ModelUnavailableError("Install PyTorch with CUDA support to use studio_product_flux_4bit.")
-
-        import torch
-        from diffusers import FluxImg2ImgPipeline
-
-        if not torch.cuda.is_available():
-            raise ModelUnavailableError("studio_product_flux_4bit needs a CUDA GPU. Use a Colab GPU runtime.")
-
-        if self._flux_4bit_pipe is not None:
-            return self._flux_4bit_pipe
-
-        dtype = self._flux_dtype(torch)
-        pipe = FluxImg2ImgPipeline.from_pretrained(
-            FLUX_4BIT_MODEL_ID,
-            torch_dtype=dtype,
-            token=self._huggingface_token(),
-        )
-        if hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload()
-        else:
-            pipe.to("cuda")
-
-        self._flux_4bit_pipe = pipe
-        return self._flux_4bit_pipe
-
-    def _flux_dtype(self, torch_module):
-        bf16_supported = getattr(torch_module.cuda, "is_bf16_supported", lambda: False)()
-        return torch_module.bfloat16 if bf16_supported else torch_module.float16
 
     def _is_generative_ready(self) -> bool:
         return bool(os.getenv("OPENAI_API_KEY")) and importlib.util.find_spec("openai") is not None
@@ -646,25 +429,6 @@ class ProductImageEnhancer:
         image.save(buffer, format="PNG", optimize=True)
         buffer.seek(0)
         return buffer.getvalue()
-
-    def _prepare_flux_reference(self, image: Image.Image, image_size: int) -> Image.Image:
-        return ImageOps.fit(image.convert("RGB"), (image_size, image_size), method=Image.Resampling.LANCZOS)
-
-    def _huggingface_token(self) -> Optional[str]:
-        return (
-            os.getenv("HF_TOKEN")
-            or os.getenv("HUGGINGFACE_HUB_TOKEN")
-            or os.getenv("HUGGING_FACE_HUB_TOKEN")
-            or None
-        )
-
-    def _flux_image_size(self) -> int:
-        image_size = max(512, min(1536, FLUX_IMAGE_SIZE))
-        return max(16, round(image_size / 16) * 16)
-
-    def _flux_4bit_image_size(self) -> int:
-        image_size = max(512, min(1536, FLUX_4BIT_IMAGE_SIZE))
-        return max(16, round(image_size / 16) * 16)
 
     def _segment_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
         mask = self._build_rembg_product_mask(image)
@@ -918,11 +682,22 @@ class ProductImageEnhancer:
             and stats.coverage <= 0.22
         )
 
+    def _has_top_contaminated_mask(self, stats: MaskStats, image_size: tuple[int, int]) -> bool:
+        top_margin = max(4, round(image_size[1] * 0.015))
+        return (
+            stats.bbox[1] <= top_margin
+            and stats.bbox_width_ratio >= 0.58
+            and stats.coverage <= 0.3
+        )
+
+    def _should_use_scene_crop(self, stats: MaskStats, image_size: tuple[int, int]) -> bool:
+        return self._is_undersegmented_tall_product(stats) or self._has_top_contaminated_mask(stats, image_size)
+
     def _product_focus_mask(self, mask: Image.Image, image_size: tuple[int, int]) -> Image.Image:
         focus = mask.convert("L").point(lambda pixel: 255 if pixel > 24 else 0, mode="L")
         stats = self._mask_stats(mask, image_size)
 
-        if stats is not None and self._is_undersegmented_tall_product(stats):
+        if stats is not None and self._should_use_scene_crop(stats, image_size):
             repair = Image.new("L", image_size, 0)
             ImageDraw.Draw(repair).rectangle(self._expand_scene_box(stats.bbox, image_size), fill=255)
             focus = ImageChops.lighter(focus, repair)
@@ -968,13 +743,21 @@ class ProductImageEnhancer:
         width, height = image_size
         box_width = right - left
         box_height = bottom - top
-        pad_x = max(round(box_width * 0.65), round(width * 0.08), 8)
-        pad_y = max(round(box_height * 0.06), round(height * 0.03), 8)
+        crop_width = min(width, max(round(box_width * 1.22), round(width * 0.42), 12))
+        crop_height = min(height, max(round(box_height * 1.12), round(height * 0.55), 12))
+        center_x = (left + right) / 2
+        center_y = top + box_height * 0.52
+
+        crop_left = round(center_x - crop_width / 2)
+        crop_top = round(center_y - crop_height / 2)
+        crop_left = max(0, min(width - crop_width, crop_left))
+        crop_top = max(0, min(height - crop_height, crop_top))
+
         return (
-            max(0, left - pad_x),
-            max(0, top - pad_y),
-            min(width, right + pad_x),
-            min(height, bottom + pad_y),
+            crop_left,
+            crop_top,
+            crop_left + crop_width,
+            crop_top + crop_height,
         )
 
     def _odd_filter_size(self, value: int, minimum: int) -> int:
@@ -984,14 +767,26 @@ class ProductImageEnhancer:
         return size
 
     def _fit_product_on_canvas(self, product: Image.Image, canvas_size: int) -> Image.Image:
-        max_width = round(canvas_size * 0.78)
-        max_height = round(canvas_size * 0.76)
+        max_width = round(canvas_size * 0.86)
+        max_height = round(canvas_size * 0.82)
         scale = min(max_width / product.width, max_height / product.height)
         new_size = (
             max(1, round(product.width * scale)),
             max(1, round(product.height * scale)),
         )
         return product.resize(new_size, Image.Resampling.LANCZOS)
+
+    def _soft_scene_crop_mask(self, size: tuple[int, int]) -> Image.Image:
+        width, height = size
+        mask = Image.new("L", size, 0)
+        inset = max(6, round(min(size) * 0.025))
+        radius = max(10, round(min(size) * 0.035))
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (inset, inset, width - inset, height - inset),
+            radius=radius,
+            fill=255,
+        )
+        return mask.filter(ImageFilter.GaussianBlur(radius=max(6, round(min(size) * 0.018))))
 
     def _output_long_edge_for(self, image: Image.Image) -> int:
         desired_long_edge = max(self.target_long_edge, max(image.size))
