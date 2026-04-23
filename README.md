@@ -25,6 +25,8 @@ This project adds a conservative product-image polish after Real-ESRGAN: color-s
 
 If rembg is unavailable, the app falls back to stricter OpenCV GrabCut masking. If masking is uncertain, the engine keeps a polished full image rather than producing a bad cutout. For tall apparel images where segmentation is likely cutting away part of the garment, it switches to a safer framed studio crop so the product is preserved.
 
+Output sizing preserves the uploaded image's original long edge when it is larger than the configured target. `target_long_edge` is now a minimum quality target, while `MAX_OUTPUT_LONG_EDGE` defaults to `4096` as a safety cap for very large uploads.
+
 `studio_product_focus` uses the same foreground-detection stack, but keeps the original scene instead of replacing the background. It enhances the detected product area with a soft mask while leaving the background present, so busy store photos can look cleaner without introducing cutout artifacts.
 
 `studio_product` is not a trainable model yet; it is a deterministic pipeline. Real store images are still useful because they reveal failure cases and let us tune the masking and fallback rules.

@@ -53,6 +53,7 @@ FLUX_NUM_INFERENCE_STEPS = _env_int("FLUX_NUM_INFERENCE_STEPS", 4)
 FLUX_STRENGTH = _env_float("FLUX_STRENGTH", 0.55)
 FLUX_GUIDANCE_SCALE = _env_float("FLUX_GUIDANCE_SCALE", 0.0)
 FLUX_SEED = _env_int("FLUX_SEED", 0)
+MAX_OUTPUT_LONG_EDGE = _env_int("MAX_OUTPUT_LONG_EDGE", 4096)
 
 
 @dataclass(frozen=True)
@@ -94,9 +95,15 @@ class ProductImageEnhancer:
     so demos and local development can run without changing product details.
     """
 
-    def __init__(self, max_input_pixels: int = 24_000_000, target_long_edge: int = 1800) -> None:
+    def __init__(
+        self,
+        max_input_pixels: int = 24_000_000,
+        target_long_edge: int = 1800,
+        max_output_long_edge: int = MAX_OUTPUT_LONG_EDGE,
+    ) -> None:
         self.max_input_pixels = max_input_pixels
-        self.target_long_edge = target_long_edge
+        self.target_long_edge = max(1, target_long_edge)
+        self.max_output_long_edge = max(self.target_long_edge, max_output_long_edge)
         self._realesrgan_status = "Checking Real-ESRGAN runtime."
         self._realesrgan = self._load_realesrgan()
         self._flux_pipe = None
@@ -277,11 +284,11 @@ class ProductImageEnhancer:
         output_bgr, _ = self._realesrgan.enhance(bgr, outscale=2)
         output_rgb = output_bgr[:, :, ::-1]
         enhanced = Image.fromarray(output_rgb)
-        enhanced = self._fit_long_edge(enhanced, self.target_long_edge)
+        enhanced = self._fit_long_edge(enhanced, self._output_long_edge_for(image))
         return self._final_polish(enhanced, preset, denoise=False, strength="model")
 
     def _fallback_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
-        image = self._fit_long_edge(image, self.target_long_edge)
+        image = self._fit_long_edge(image, self._output_long_edge_for(image))
         return self._final_polish(image, preset, denoise=True, strength="fallback")
 
     def _studio_product_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
@@ -304,7 +311,7 @@ class ProductImageEnhancer:
         product_rgba = product.convert("RGBA")
         product_rgba.putalpha(product_mask)
 
-        canvas_size = self.target_long_edge
+        canvas_size = self._output_long_edge_for(image)
         product_rgba = self._fit_product_on_canvas(product_rgba, canvas_size)
         product_alpha = product_rgba.getchannel("A")
 
@@ -333,7 +340,7 @@ class ProductImageEnhancer:
         crop = image.crop(crop_box)
         crop = self._final_polish(crop, preset, denoise=True, strength="studio")
 
-        canvas_size = self.target_long_edge
+        canvas_size = self._output_long_edge_for(image)
         background = ImageOps.fit(crop, (canvas_size, canvas_size), method=Image.Resampling.LANCZOS)
         background = background.filter(ImageFilter.GaussianBlur(radius=max(14, canvas_size // 55)))
         background = ImageEnhance.Color(background).enhance(0.25)
@@ -355,7 +362,7 @@ class ProductImageEnhancer:
         focus_mask = self._product_focus_mask(mask, image.size)
         product_scene = self._final_polish(image, preset, denoise=True, strength="studio")
         focused_scene = Image.composite(product_scene, image, focus_mask)
-        return self._fit_long_edge(focused_scene.convert("RGB"), self.target_long_edge)
+        return self._fit_long_edge(focused_scene.convert("RGB"), self._output_long_edge_for(image))
 
     def _studio_product_flux_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         pipe = self._load_flux_pipeline()
@@ -397,6 +404,7 @@ class ProductImageEnhancer:
             raise ModelRuntimeError("Flux image-to-image enhancement failed during inference.") from exc
 
         generated = result.images[0].convert("RGB")
+        generated = self._fit_long_edge(generated, self._output_long_edge_for(image))
         return self._final_polish(generated, preset, denoise=False, strength="model")
 
     def _studio_product_generative_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
@@ -417,7 +425,7 @@ class ProductImageEnhancer:
             raise ModelRuntimeError("Generative studio enhancement failed during OpenAI image editing.") from exc
 
         generated = generated.convert("RGB")
-        generated = self._fit_long_edge(generated, self.target_long_edge)
+        generated = self._fit_long_edge(generated, self._output_long_edge_for(image))
         return self._final_polish(generated, preset, denoise=False, strength="model")
 
     def _studio_engine_detail(self) -> str:
@@ -984,6 +992,10 @@ class ProductImageEnhancer:
             max(1, round(product.height * scale)),
         )
         return product.resize(new_size, Image.Resampling.LANCZOS)
+
+    def _output_long_edge_for(self, image: Image.Image) -> int:
+        desired_long_edge = max(self.target_long_edge, max(image.size))
+        return min(desired_long_edge, self.max_output_long_edge)
 
     def _studio_product_y(self, canvas_size: int, product_height: int) -> int:
         top_limit = round(canvas_size * 0.08)
