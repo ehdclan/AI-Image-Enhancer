@@ -34,7 +34,7 @@ Output sizing preserves the uploaded image's original long edge when it is large
 Batch-check local store images with:
 
 ```bash
-python scripts/evaluate_studio_product.py "ALATPay Store Images" --output-dir outputs/alatpay_studio_eval
+python scripts/evaluate_studio_product.py "Images" --output-dir outputs/eval
 ```
 
 The script writes enhanced outputs and `comparison_sheet.jpg` for quick visual review. Local store-image folders and generated outputs are ignored by git.
