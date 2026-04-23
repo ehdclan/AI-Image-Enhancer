@@ -36,6 +36,7 @@ EngineName = Literal[
     "studio_product",
     "studio_product_focus",
     "studio_product_flux",
+    "studio_product_flux_4bit",
     "studio_product_generative",
 ]
 
@@ -45,7 +46,9 @@ REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
 FLUX_MODEL_ID = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-schnell")
+FLUX_4BIT_MODEL_ID = os.getenv("FLUX_4BIT_MODEL_ID", "magespace/FLUX.1-schnell-bnb-nf4")
 FLUX_IMAGE_SIZE = _env_int("FLUX_IMAGE_SIZE", 768)
+FLUX_4BIT_IMAGE_SIZE = _env_int("FLUX_4BIT_IMAGE_SIZE", 768)
 FLUX_NUM_INFERENCE_STEPS = _env_int("FLUX_NUM_INFERENCE_STEPS", 4)
 FLUX_STRENGTH = _env_float("FLUX_STRENGTH", 0.55)
 FLUX_GUIDANCE_SCALE = _env_float("FLUX_GUIDANCE_SCALE", 0.0)
@@ -97,6 +100,7 @@ class ProductImageEnhancer:
         self._realesrgan_status = "Checking Real-ESRGAN runtime."
         self._realesrgan = self._load_realesrgan()
         self._flux_pipe = None
+        self._flux_4bit_pipe = None
         self._rembg_session = None
         self._rembg_session_model: Optional[str] = None
 
@@ -130,6 +134,9 @@ class ProductImageEnhancer:
         elif engine == "studio_product_flux":
             enhanced = self._studio_product_flux_enhance(image, preset)
             engine_label = f"Studio product Flux ({FLUX_MODEL_ID})"
+        elif engine == "studio_product_flux_4bit":
+            enhanced = self._studio_product_flux_4bit_enhance(image, preset)
+            engine_label = f"Studio product Flux 4-bit ({FLUX_4BIT_MODEL_ID})"
         elif engine == "studio_product_generative":
             enhanced = self._studio_product_generative_enhance(image, preset)
             engine_label = f"Studio product generative ({OPENAI_IMAGE_MODEL})"
@@ -170,6 +177,12 @@ class ProductImageEnhancer:
                 "available": self._is_flux_ready(),
                 "detail": self._flux_engine_detail(),
                 "model": FLUX_MODEL_ID,
+            },
+            "studio_product_flux_4bit": {
+                "label": "Studio product Flux 4-bit",
+                "available": self._is_flux_4bit_ready(),
+                "detail": self._flux_4bit_engine_detail(),
+                "model": FLUX_4BIT_MODEL_ID,
             },
             "studio_product_generative": {
                 "label": "Studio product generative",
@@ -346,8 +359,21 @@ class ProductImageEnhancer:
 
     def _studio_product_flux_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         pipe = self._load_flux_pipeline()
+        return self._enhance_with_flux_pipeline(image, preset, pipe, self._flux_image_size())
+
+    def _studio_product_flux_4bit_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        pipe = self._load_flux_4bit_pipeline()
+        return self._enhance_with_flux_pipeline(image, preset, pipe, self._flux_4bit_image_size())
+
+    def _enhance_with_flux_pipeline(
+        self,
+        image: Image.Image,
+        preset: PresetName,
+        pipe,
+        image_size: int,
+    ) -> Image.Image:
         reference = self._studio_product_enhance(image, preset)
-        reference = self._prepare_flux_reference(reference)
+        reference = self._prepare_flux_reference(reference, image_size)
 
         try:
             import torch
@@ -429,6 +455,21 @@ class ProductImageEnhancer:
         except Exception:
             return False
 
+    def _is_flux_4bit_ready(self) -> bool:
+        if (
+            importlib.util.find_spec("diffusers") is None
+            or importlib.util.find_spec("torch") is None
+            or importlib.util.find_spec("bitsandbytes") is None
+        ):
+            return False
+
+        try:
+            import torch
+
+            return torch.cuda.is_available()
+        except Exception:
+            return False
+
     def _flux_engine_detail(self) -> str:
         if importlib.util.find_spec("diffusers") is None:
             return "Not ready. Install the optional Flux dependencies from requirements-flux.txt."
@@ -450,6 +491,30 @@ class ProductImageEnhancer:
             f"strength={max(0.0, min(1.0, FLUX_STRENGTH))}."
         )
 
+    def _flux_4bit_engine_detail(self) -> str:
+        if importlib.util.find_spec("diffusers") is None:
+            return "Not ready. Install the optional Flux dependencies from requirements-flux.txt."
+
+        if importlib.util.find_spec("bitsandbytes") is None:
+            return "Not ready. Install bitsandbytes from requirements-flux.txt for the 4-bit Flux engine."
+
+        if importlib.util.find_spec("torch") is None:
+            return "Not ready. Install PyTorch with CUDA support."
+
+        try:
+            import torch
+        except Exception:
+            return "Not ready. PyTorch could not be imported."
+
+        if not torch.cuda.is_available():
+            return "Not ready. Flux 4-bit needs a CUDA GPU; use a Colab GPU runtime for testing."
+
+        return (
+            f"Ready with compact {FLUX_4BIT_MODEL_ID}. Uses pre-quantized Flux image-to-image after "
+            f"studio_product with size={self._flux_4bit_image_size()}, "
+            f"steps={max(1, FLUX_NUM_INFERENCE_STEPS)}, strength={max(0.0, min(1.0, FLUX_STRENGTH))}."
+        )
+
     def _load_flux_pipeline(self):
         if importlib.util.find_spec("diffusers") is None:
             raise ModelUnavailableError("Install the optional Flux dependencies from requirements-flux.txt.")
@@ -466,8 +531,7 @@ class ProductImageEnhancer:
         if self._flux_pipe is not None:
             return self._flux_pipe
 
-        bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
-        dtype = torch.bfloat16 if bf16_supported else torch.float16
+        dtype = self._flux_dtype(torch)
         pipe = FluxImg2ImgPipeline.from_pretrained(
             FLUX_MODEL_ID,
             torch_dtype=dtype,
@@ -480,6 +544,43 @@ class ProductImageEnhancer:
 
         self._flux_pipe = pipe
         return self._flux_pipe
+
+    def _load_flux_4bit_pipeline(self):
+        if importlib.util.find_spec("diffusers") is None:
+            raise ModelUnavailableError("Install the optional Flux dependencies from requirements-flux.txt.")
+
+        if importlib.util.find_spec("bitsandbytes") is None:
+            raise ModelUnavailableError("Install bitsandbytes from requirements-flux.txt to use studio_product_flux_4bit.")
+
+        if importlib.util.find_spec("torch") is None:
+            raise ModelUnavailableError("Install PyTorch with CUDA support to use studio_product_flux_4bit.")
+
+        import torch
+        from diffusers import FluxImg2ImgPipeline
+
+        if not torch.cuda.is_available():
+            raise ModelUnavailableError("studio_product_flux_4bit needs a CUDA GPU. Use a Colab GPU runtime.")
+
+        if self._flux_4bit_pipe is not None:
+            return self._flux_4bit_pipe
+
+        dtype = self._flux_dtype(torch)
+        pipe = FluxImg2ImgPipeline.from_pretrained(
+            FLUX_4BIT_MODEL_ID,
+            torch_dtype=dtype,
+            token=self._huggingface_token(),
+        )
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to("cuda")
+
+        self._flux_4bit_pipe = pipe
+        return self._flux_4bit_pipe
+
+    def _flux_dtype(self, torch_module):
+        bf16_supported = getattr(torch_module.cuda, "is_bf16_supported", lambda: False)()
+        return torch_module.bfloat16 if bf16_supported else torch_module.float16
 
     def _is_generative_ready(self) -> bool:
         return bool(os.getenv("OPENAI_API_KEY")) and importlib.util.find_spec("openai") is not None
@@ -538,8 +639,7 @@ class ProductImageEnhancer:
         buffer.seek(0)
         return buffer.getvalue()
 
-    def _prepare_flux_reference(self, image: Image.Image) -> Image.Image:
-        image_size = self._flux_image_size()
+    def _prepare_flux_reference(self, image: Image.Image, image_size: int) -> Image.Image:
         return ImageOps.fit(image.convert("RGB"), (image_size, image_size), method=Image.Resampling.LANCZOS)
 
     def _huggingface_token(self) -> Optional[str]:
@@ -552,6 +652,10 @@ class ProductImageEnhancer:
 
     def _flux_image_size(self) -> int:
         image_size = max(512, min(1536, FLUX_IMAGE_SIZE))
+        return max(16, round(image_size / 16) * 16)
+
+    def _flux_4bit_image_size(self) -> int:
+        image_size = max(512, min(1536, FLUX_4BIT_IMAGE_SIZE))
         return max(16, round(image_size / 16) * 16)
 
     def _segment_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
