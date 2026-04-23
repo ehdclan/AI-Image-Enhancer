@@ -7,7 +7,7 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `studio_product_generative`, `studio_product_focus`, `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
+2. Let the caller choose `studio_product_generative`, `studio_product_flux`, `studio_product_focus`, `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
 3. Use a deterministic Pillow-based enhancer for local demos and resilience.
 4. Return a catalog-ready JPEG as a data URL.
 
@@ -36,6 +36,28 @@ python scripts/evaluate_studio_product.py "ALATPay Store Images" --output-dir ou
 ```
 
 The script writes enhanced outputs and `comparison_sheet.jpg` for quick visual review. Local store-image folders and generated outputs are ignored by git.
+
+## Studio Product Flux Mode
+
+`studio_product_flux` is the optional open-weight generative test engine. It first builds the safer `studio_product` reference image, then runs Flux image-to-image with `black-forest-labs/FLUX.1-schnell` and the same strict product-preservation prompt used by the controlled generative mode.
+
+Install the optional local dependencies with:
+
+```bash
+pip install -r requirements-flux.txt
+```
+
+Recommended Colab settings:
+
+```bash
+export FLUX_MODEL_ID=black-forest-labs/FLUX.1-schnell
+export FLUX_IMAGE_SIZE=768
+export FLUX_NUM_INFERENCE_STEPS=4
+export FLUX_STRENGTH=0.55
+export FLUX_GUIDANCE_SCALE=0.0
+```
+
+Flux is much heavier than the deterministic engines. Use a CUDA GPU runtime, start with `FLUX_IMAGE_SIZE=768` on a T4, and lower `FLUX_STRENGTH` if it changes product details too aggressively. If Hugging Face blocks the model download, accept the `FLUX.1-schnell` model terms and set `HF_TOKEN` in the runtime.
 
 ## Studio Product Generative Mode
 
@@ -79,7 +101,7 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_focus`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_flux`, `studio_product_focus`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
 
 ## API
 
@@ -118,6 +140,7 @@ Available presets:
 Available engines:
 
 - `studio_product_generative`
+- `studio_product_flux`
 - `studio_product_focus`
 - `studio_product`
 - `realesrgan`

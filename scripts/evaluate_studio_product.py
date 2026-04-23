@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-long-edge", type=int, default=1200)
     parser.add_argument(
         "--engine",
-        choices=["studio_product", "studio_product_focus"],
+        choices=["studio_product", "studio_product_focus", "studio_product_flux"],
         default="studio_product",
     )
     parser.add_argument(
@@ -106,7 +106,9 @@ def main() -> None:
         mode = "fallback"
         mask_label = "mask=none"
         if stats is not None:
-            if args.engine == "studio_product_focus":
+            if args.engine == "studio_product_flux":
+                mode = "flux_img2img"
+            elif args.engine == "studio_product_focus":
                 mode = "focus_mask"
             else:
                 mode = "scene_crop" if enhancer._is_undersegmented_tall_product(stats) else "cutout"
@@ -117,7 +119,11 @@ def main() -> None:
 
         result = enhancer.enhance(source_bytes, preset=args.preset, engine=args.engine)
         enhanced = Image.open(io.BytesIO(result.image_bytes)).convert("RGB")
-        output_suffix = "focus" if args.engine == "studio_product_focus" else "studio"
+        output_suffix = {
+            "studio_product": "studio",
+            "studio_product_focus": "focus",
+            "studio_product_flux": "flux",
+        }[args.engine]
         output_path = args.output_dir / f"{source_path.stem}-{output_suffix}.jpg"
         enhanced.save(output_path, quality=92)
 

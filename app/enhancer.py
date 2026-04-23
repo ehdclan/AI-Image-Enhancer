@@ -14,12 +14,28 @@ from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOp
 
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 PresetName = Literal["product_standard", "product_detail", "product_soft"]
 EngineName = Literal[
     "realesrgan",
     "pillow_fallback",
     "studio_product",
     "studio_product_focus",
+    "studio_product_flux",
     "studio_product_generative",
 ]
 
@@ -28,6 +44,12 @@ REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
 REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
+FLUX_MODEL_ID = os.getenv("FLUX_MODEL_ID", "black-forest-labs/FLUX.1-schnell")
+FLUX_IMAGE_SIZE = _env_int("FLUX_IMAGE_SIZE", 768)
+FLUX_NUM_INFERENCE_STEPS = _env_int("FLUX_NUM_INFERENCE_STEPS", 4)
+FLUX_STRENGTH = _env_float("FLUX_STRENGTH", 0.55)
+FLUX_GUIDANCE_SCALE = _env_float("FLUX_GUIDANCE_SCALE", 0.0)
+FLUX_SEED = _env_int("FLUX_SEED", 0)
 
 
 @dataclass(frozen=True)
@@ -74,6 +96,7 @@ class ProductImageEnhancer:
         self.target_long_edge = target_long_edge
         self._realesrgan_status = "Checking Real-ESRGAN runtime."
         self._realesrgan = self._load_realesrgan()
+        self._flux_pipe = None
         self._rembg_session = None
         self._rembg_session_model: Optional[str] = None
 
@@ -104,6 +127,9 @@ class ProductImageEnhancer:
         elif engine == "studio_product_focus":
             enhanced = self._studio_product_focus_enhance(image, preset)
             engine_label = "Studio product focus"
+        elif engine == "studio_product_flux":
+            enhanced = self._studio_product_flux_enhance(image, preset)
+            engine_label = f"Studio product Flux ({FLUX_MODEL_ID})"
         elif engine == "studio_product_generative":
             enhanced = self._studio_product_generative_enhance(image, preset)
             engine_label = f"Studio product generative ({OPENAI_IMAGE_MODEL})"
@@ -138,6 +164,12 @@ class ProductImageEnhancer:
                 "label": "Studio product focus",
                 "available": True,
                 "detail": self._focus_engine_detail(),
+            },
+            "studio_product_flux": {
+                "label": "Studio product Flux",
+                "available": self._is_flux_ready(),
+                "detail": self._flux_engine_detail(),
+                "model": FLUX_MODEL_ID,
             },
             "studio_product_generative": {
                 "label": "Studio product generative",
@@ -312,6 +344,35 @@ class ProductImageEnhancer:
         focused_scene = Image.composite(product_scene, image, focus_mask)
         return self._fit_long_edge(focused_scene.convert("RGB"), self.target_long_edge)
 
+    def _studio_product_flux_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        pipe = self._load_flux_pipeline()
+        reference = self._studio_product_enhance(image, preset)
+        reference = self._prepare_flux_reference(reference)
+
+        try:
+            import torch
+
+            generator = torch.Generator("cpu").manual_seed(FLUX_SEED) if FLUX_SEED >= 0 else None
+            result = pipe(
+                prompt=self._generative_product_prompt(),
+                image=reference,
+                height=reference.height,
+                width=reference.width,
+                strength=max(0.0, min(1.0, FLUX_STRENGTH)),
+                guidance_scale=FLUX_GUIDANCE_SCALE,
+                num_inference_steps=max(1, FLUX_NUM_INFERENCE_STEPS),
+                max_sequence_length=256,
+                generator=generator,
+            )
+        except ModelUnavailableError:
+            raise
+        except Exception as exc:  # pragma: no cover - optional GPU runtime is deployment-specific
+            logger.exception("Flux image-to-image inference failed")
+            raise ModelRuntimeError("Flux image-to-image enhancement failed during inference.") from exc
+
+        generated = result.images[0].convert("RGB")
+        return self._final_polish(generated, preset, denoise=False, strength="model")
+
     def _studio_product_generative_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         if not os.getenv("OPENAI_API_KEY"):
             raise ModelUnavailableError("Set OPENAI_API_KEY to use studio_product_generative.")
@@ -356,6 +417,69 @@ class ProductImageEnhancer:
             return "Ready with OpenCV focus masking. Keeps the original background and enhances the product area."
 
         return "Ready with full-scene fallback polish. Install rembg for product-only focus."
+
+    def _is_flux_ready(self) -> bool:
+        if importlib.util.find_spec("diffusers") is None or importlib.util.find_spec("torch") is None:
+            return False
+
+        try:
+            import torch
+
+            return torch.cuda.is_available()
+        except Exception:
+            return False
+
+    def _flux_engine_detail(self) -> str:
+        if importlib.util.find_spec("diffusers") is None:
+            return "Not ready. Install the optional Flux dependencies from requirements-flux.txt."
+
+        if importlib.util.find_spec("torch") is None:
+            return "Not ready. Install PyTorch with CUDA support."
+
+        try:
+            import torch
+        except Exception:
+            return "Not ready. PyTorch could not be imported."
+
+        if not torch.cuda.is_available():
+            return "Not ready. Flux needs a CUDA GPU; use a Colab GPU runtime for testing."
+
+        return (
+            f"Ready with {FLUX_MODEL_ID}. Uses Flux image-to-image after studio_product with "
+            f"size={self._flux_image_size()}, steps={max(1, FLUX_NUM_INFERENCE_STEPS)}, "
+            f"strength={max(0.0, min(1.0, FLUX_STRENGTH))}."
+        )
+
+    def _load_flux_pipeline(self):
+        if importlib.util.find_spec("diffusers") is None:
+            raise ModelUnavailableError("Install the optional Flux dependencies from requirements-flux.txt.")
+
+        if importlib.util.find_spec("torch") is None:
+            raise ModelUnavailableError("Install PyTorch with CUDA support to use studio_product_flux.")
+
+        import torch
+        from diffusers import FluxImg2ImgPipeline
+
+        if not torch.cuda.is_available():
+            raise ModelUnavailableError("studio_product_flux needs a CUDA GPU. Use a Colab GPU runtime.")
+
+        if self._flux_pipe is not None:
+            return self._flux_pipe
+
+        bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        dtype = torch.bfloat16 if bf16_supported else torch.float16
+        pipe = FluxImg2ImgPipeline.from_pretrained(
+            FLUX_MODEL_ID,
+            torch_dtype=dtype,
+            token=self._huggingface_token(),
+        )
+        if hasattr(pipe, "enable_model_cpu_offload"):
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to("cuda")
+
+        self._flux_pipe = pipe
+        return self._flux_pipe
 
     def _is_generative_ready(self) -> bool:
         return bool(os.getenv("OPENAI_API_KEY")) and importlib.util.find_spec("openai") is not None
@@ -413,6 +537,22 @@ class ProductImageEnhancer:
         image.save(buffer, format="PNG", optimize=True)
         buffer.seek(0)
         return buffer.getvalue()
+
+    def _prepare_flux_reference(self, image: Image.Image) -> Image.Image:
+        image_size = self._flux_image_size()
+        return ImageOps.fit(image.convert("RGB"), (image_size, image_size), method=Image.Resampling.LANCZOS)
+
+    def _huggingface_token(self) -> Optional[str]:
+        return (
+            os.getenv("HF_TOKEN")
+            or os.getenv("HUGGINGFACE_HUB_TOKEN")
+            or os.getenv("HUGGING_FACE_HUB_TOKEN")
+            or None
+        )
+
+    def _flux_image_size(self) -> int:
+        image_size = max(512, min(1536, FLUX_IMAGE_SIZE))
+        return max(16, round(image_size / 16) * 16)
 
     def _segment_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
         mask = self._build_rembg_product_mask(image)
