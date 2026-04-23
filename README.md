@@ -7,7 +7,7 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `studio_product_generative`, `studio_product_portrait`, `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
+2. Let the caller choose `studio_product_generative`, `studio_product_focus`, `studio_product`, `RealESRGAN_x4plus`, or `pillow_fallback`.
 3. Use a deterministic Pillow-based enhancer for local demos and resilience.
 4. Return a catalog-ready JPEG as a data URL.
 
@@ -25,7 +25,7 @@ This project adds a conservative product-image polish after Real-ESRGAN: color-s
 
 If rembg is unavailable, the app falls back to stricter OpenCV GrabCut masking. If masking is uncertain, the engine keeps a polished full image rather than producing a bad cutout. For tall apparel images where segmentation is likely cutting away part of the garment, it switches to a safer framed studio crop so the product is preserved.
 
-`studio_product_portrait` uses the same foreground-detection stack, but keeps the original scene instead of replacing the background. It blurs and softens the background, expands the focus mask where needed, and blends the sharp product back in with a feathered edge. This is useful when a clean cutout leaves visible background fragments around hairline edges, sleeves, transparent packaging, or busy product shapes.
+`studio_product_focus` uses the same foreground-detection stack, but keeps the original scene instead of replacing the background. It enhances the detected product area with a soft mask while leaving the background present, so busy store photos can look cleaner without introducing cutout artifacts.
 
 `studio_product` is not a trainable model yet; it is a deterministic pipeline. Real store images are still useful because they reveal failure cases and let us tune the masking and fallback rules.
 
@@ -79,7 +79,7 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_portrait`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_focus`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before/after images, and produces an API-style base64 response.
 
 ## API
 
@@ -118,7 +118,7 @@ Available presets:
 Available engines:
 
 - `studio_product_generative`
-- `studio_product_portrait`
+- `studio_product_focus`
 - `studio_product`
 - `realesrgan`
 - `pillow_fallback`

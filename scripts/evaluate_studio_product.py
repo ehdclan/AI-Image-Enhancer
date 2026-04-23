@@ -18,7 +18,7 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Batch-evaluate studio_product on local store images.")
+    parser = argparse.ArgumentParser(description="Batch-evaluate studio product engines on local store images.")
     parser.add_argument("input_dir", type=Path, help="Folder containing source product images.")
     parser.add_argument(
         "--output-dir",
@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-long-edge", type=int, default=1200)
     parser.add_argument(
         "--engine",
-        choices=["studio_product", "studio_product_portrait"],
+        choices=["studio_product", "studio_product_focus"],
         default="studio_product",
     )
     parser.add_argument(
@@ -106,7 +106,10 @@ def main() -> None:
         mode = "fallback"
         mask_label = "mask=none"
         if stats is not None:
-            mode = "scene_crop" if enhancer._is_undersegmented_tall_product(stats) else "cutout"
+            if args.engine == "studio_product_focus":
+                mode = "focus_mask"
+            else:
+                mode = "scene_crop" if enhancer._is_undersegmented_tall_product(stats) else "cutout"
             mask_label = (
                 f"mask={stats.coverage:.1%} "
                 f"w={stats.bbox_width_ratio:.0%} h={stats.bbox_height_ratio:.0%}"
@@ -114,7 +117,7 @@ def main() -> None:
 
         result = enhancer.enhance(source_bytes, preset=args.preset, engine=args.engine)
         enhanced = Image.open(io.BytesIO(result.image_bytes)).convert("RGB")
-        output_suffix = "portrait" if args.engine == "studio_product_portrait" else "studio"
+        output_suffix = "focus" if args.engine == "studio_product_focus" else "studio"
         output_path = args.output_dir / f"{source_path.stem}-{output_suffix}.jpg"
         enhanced.save(output_path, quality=92)
 
