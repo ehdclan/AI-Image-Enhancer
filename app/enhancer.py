@@ -263,9 +263,6 @@ class ProductImageEnhancer:
         if stats is None:
             return self._fallback_enhance(image, preset)
 
-        if self._should_use_scene_crop(stats, image.size):
-            return self._studio_scene_crop_enhance(image, stats.bbox, preset)
-
         bbox = self._expand_box(stats.bbox, image.size, padding=max(4, round(max(image.size) * 0.015)))
         product = image.crop(bbox)
         product_mask = mask.crop(bbox)
