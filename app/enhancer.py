@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import base64
 import io
 import importlib.util
 import logging
 import os
 import warnings
-from binascii import Error as BinasciiError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -30,14 +28,11 @@ EngineName = Literal[
     "studio_product",
     "studio_product_realesrgan",
     "studio_product_focus",
-    "studio_product_generative",
 ]
 
 REALESRGAN_MODEL_PATH = Path(os.getenv("REALESRGAN_MODEL_PATH", "weights/RealESRGAN_x4plus.pth"))
 REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
 REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
-OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
-OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
 MAX_OUTPUT_LONG_EDGE = _env_int("MAX_OUTPUT_LONG_EDGE", 4096)
 MAX_INPUT_BYTES = _env_int("MAX_INPUT_BYTES", 12_000_000)
 ALLOWED_IMAGE_FORMATS = ("JPEG", "PNG", "WEBP")
@@ -139,9 +134,6 @@ class ProductImageEnhancer:
         elif engine == "studio_product_focus":
             enhanced = self._studio_product_focus_enhance(image, preset)
             engine_label = "Studio product focus"
-        elif engine == "studio_product_generative":
-            enhanced = self._studio_product_generative_enhance(image, preset)
-            engine_label = f"Studio product generative ({OPENAI_IMAGE_MODEL})"
         else:
             enhanced = self._fallback_enhance(image, preset)
             engine_label = "Pillow fallback"
@@ -178,11 +170,6 @@ class ProductImageEnhancer:
                 "label": "Studio product focus",
                 "available": True,
                 "detail": self._focus_engine_detail(),
-            },
-            "studio_product_generative": {
-                "label": "Studio product generative",
-                "available": self._is_generative_ready(),
-                "detail": self._generative_engine_detail(),
             },
             "realesrgan": {
                 "label": "Real-ESRGAN x4plus",
@@ -368,27 +355,6 @@ class ProductImageEnhancer:
         focused_scene = Image.composite(product_scene, image, focus_mask)
         return self._fit_long_edge(focused_scene.convert("RGB"), self._output_long_edge_for(image))
 
-    def _studio_product_generative_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
-        if not os.getenv("OPENAI_API_KEY"):
-            raise ModelUnavailableError("Set OPENAI_API_KEY to use studio_product_generative.")
-
-        if importlib.util.find_spec("openai") is None:
-            raise ModelUnavailableError("Install the openai Python package to use studio_product_generative.")
-
-        reference = self._studio_product_enhance(image, preset)
-
-        try:
-            generated = self._enhance_with_openai_image_edit(reference)
-        except ModelRuntimeError:
-            raise
-        except Exception as exc:  # pragma: no cover - external API behavior varies by account/model
-            logger.exception("OpenAI image edit failed")
-            raise ModelRuntimeError("Generative studio enhancement failed during OpenAI image editing.") from exc
-
-        generated = generated.convert("RGB")
-        generated = self._fit_long_edge(generated, self._output_long_edge_for(image))
-        return self._final_polish(generated, preset, denoise=False, strength="model")
-
     def _studio_engine_detail(self) -> str:
         if importlib.util.find_spec("rembg") is not None:
             return (
@@ -421,63 +387,6 @@ class ProductImageEnhancer:
             "Ready. Runs studio_product_focus first to enhance the product while keeping the original scene, "
             "then applies Real-ESRGAN restoration for rough or low-quality source images."
         )
-
-    def _is_generative_ready(self) -> bool:
-        return bool(os.getenv("OPENAI_API_KEY")) and importlib.util.find_spec("openai") is not None
-
-    def _generative_engine_detail(self) -> str:
-        if importlib.util.find_spec("openai") is None:
-            return "Not ready. Install the openai Python package."
-
-        if not os.getenv("OPENAI_API_KEY"):
-            return "Not ready. Set OPENAI_API_KEY to enable the controlled generative studio-photo pass."
-
-        return (
-            "Ready with a constrained generative edit pass after studio_product to preserve the product while "
-            "improving lighting, background, and camera finish."
-        )
-
-    def _enhance_with_openai_image_edit(self, reference: Image.Image) -> Image.Image:
-        from openai import OpenAI
-
-        client = OpenAI()
-        reference_file = io.BytesIO(self._image_to_png_bytes(reference))
-        reference_file.name = "product-reference.png"
-
-        result = client.images.edit(
-            model=OPENAI_IMAGE_MODEL,
-            image=reference_file,
-            prompt=self._generative_product_prompt(),
-            size=OPENAI_IMAGE_SIZE,
-        )
-
-        if not result.data or not result.data[0].b64_json:
-            raise ModelRuntimeError("OpenAI image edit did not return image bytes.")
-
-        try:
-            output_bytes = base64.b64decode(result.data[0].b64_json)
-            output = Image.open(io.BytesIO(output_bytes))
-            output.load()
-            return output
-        except (BinasciiError, ValueError, OSError) as exc:
-            raise ModelRuntimeError("OpenAI image edit returned unreadable image bytes.") from exc
-
-    def _generative_product_prompt(self) -> str:
-        return (
-            "Create a premium ecommerce product photo from this reference image. "
-            "Preserve the exact product identity, shape, proportions, colors, material texture, logos, labels, "
-            "printed text, packaging edges, and item count. Do not invent, replace, rewrite, remove, or stylize "
-            "any branding or product text. Improve only the catalog photography: clean off-white studio background, "
-            "balanced DSLR or mirrorless camera lighting, natural soft contact shadow, crisp focus, realistic color, "
-            "and subtle high-end product-photo finish. Keep the product centered and fully visible. "
-            "No hands, props, extra objects, decorative elements, watermarks, fake labels, or lifestyle scene."
-        )
-
-    def _image_to_png_bytes(self, image: Image.Image) -> bytes:
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG", optimize=True)
-        buffer.seek(0)
-        return buffer.getvalue()
 
     def _segment_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
         mask = self._build_rembg_product_mask(image)

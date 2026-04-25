@@ -7,7 +7,7 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `studio_product_generative`, `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`.
+2. Let the caller choose `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`.
 3. Use deterministic enhancement paths by default so product details stay faithful.
 4. Return a catalog-ready JPEG, with binary responses as the default transport.
 
@@ -58,25 +58,6 @@ Batch-check local store images with:
 python scripts/evaluate_studio_product.py "Images" --output-dir outputs/eval
 ```
 
-## Studio Product Generative Mode
-
-`studio_product_generative` is the optional controlled generative pass. It first creates the safer `studio_product` image, then sends that result as a reference image to OpenAI image editing with a strict product-preservation prompt. The prompt asks the model to improve studio lighting, background, camera quality, and shadow while preserving product shape, color, labels, logos, printed text, packaging edges, and item count.
-
-Enable it by setting an API key before starting the server:
-
-```bash
-export OPENAI_API_KEY=your_key_here
-```
-
-Optional settings:
-
-```bash
-export OPENAI_IMAGE_MODEL=gpt-image-2
-export OPENAI_IMAGE_SIZE=1024x1024
-```
-
-This mode can produce a stronger catalog-photo transformation, but it can still alter small label text or fine packaging details. Keep `studio_product` available as the fidelity-first fallback.
-
 ## Run Locally
 
 ```bash
@@ -100,7 +81,7 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before and after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before and after images, and produces an API-style base64 response.
 
 ## API
 
@@ -161,7 +142,6 @@ Available presets:
 
 Available engines:
 
-- `studio_product_generative`
 - `studio_product_focus`
 - `studio_product_realesrgan`
 - `studio_product`

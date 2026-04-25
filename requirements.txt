@@ -6,4 +6,3 @@ numpy<2.0
 opencv-python-headless==4.10.0.84
 onnxruntime==1.19.2
 rembg==2.0.57
-openai>=2.0.0,<3.0.0
