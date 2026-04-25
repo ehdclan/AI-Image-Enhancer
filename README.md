@@ -7,11 +7,32 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `studio_product_generative`, `studio_product_focus`, `studio_product`, `realesrgan`, or `pillow_fallback`.
+2. Let the caller choose `studio_product_generative`, `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`.
 3. Use deterministic enhancement paths by default so product details stay faithful.
-4. Return a catalog-ready JPEG as a data URL.
+4. Return a catalog-ready JPEG, with binary responses as the default transport.
 
 This keeps product details intact while still improving clarity, contrast, color balance, and perceived sharpness.
+
+## Security Defaults
+
+The service now ships with safer defaults:
+
+- `/api/enhance`, `/api/enhance/base64`, and `/api/engines` are loopback-only unless `ENHANCER_API_KEY` is configured.
+- The main upload endpoint accepts a raw image request body instead of multipart form uploads.
+- Request bodies are capped with `MAX_INPUT_BYTES`, and enhancement concurrency is capped with `MAX_CONCURRENT_JOBS`.
+- CORS is disabled unless you explicitly set `CORS_ALLOW_ORIGINS`.
+- Static byte-range requests are blocked, and security headers are added on every response.
+
+Useful environment variables:
+
+```bash
+export ENHANCER_API_KEY=replace_me_for_remote_access
+export MAX_INPUT_BYTES=12000000
+export MAX_CONCURRENT_JOBS=2
+export RATE_LIMIT_REQUESTS=20
+export RATE_LIMIT_WINDOW_SECONDS=60
+export CORS_ALLOW_ORIGINS=https://your-frontend.example
+```
 
 ## Why Real-ESRGAN Can Look Subtle
 
@@ -24,6 +45,8 @@ This project adds a conservative product-image polish after Real-ESRGAN: color-s
 `studio_product` is the non-generative catalog-photo mode. It uses rembg segmentation when available, falls back to OpenCV GrabCut, and then falls back to a simple heuristic mask when needed. If masking is uncertain, it keeps a polished full-image result instead of forcing a bad cutout.
 
 For tall apparel images where segmentation is likely cutting away part of the garment, it switches to a safer framed studio crop so the product stays intact. Output sizing preserves the uploaded image's original long edge when it is larger than the configured target. `target_long_edge` acts as a minimum quality target, while `MAX_OUTPUT_LONG_EDGE` defaults to `4096` as a safety cap for very large uploads.
+
+`studio_product_realesrgan` runs `studio_product_focus` first and then applies Real-ESRGAN restoration. It is useful for rough inputs where you want the product area enhanced first without forcing a hard background replacement, then a second pass to recover perceived detail and reduce low-quality artifacts.
 
 `studio_product_focus` uses the same foreground-detection stack, but keeps the original scene instead of replacing the background. It enhances the detected product area with a soft mask while leaving the background present.
 
@@ -63,7 +86,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Open:
+Open locally:
 
 ```text
 http://127.0.0.1:8000
@@ -77,18 +100,36 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_focus`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before and after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_generative`, `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before and after images, and produces an API-style base64 response.
 
 ## API
 
 ```http
 POST /api/enhance
-Content-Type: multipart/form-data
+Content-Type: image/jpeg
 
-image=<file>
+Query:
+
 preset=product_standard
 engine=pillow_fallback
+response_format=binary
 ```
+
+Request body:
+
+```text
+raw image bytes
+```
+
+Successful responses default to `image/jpeg` with metadata in headers:
+
+- `X-Image-Width`
+- `X-Image-Height`
+- `X-Enhancer-Engine`
+- `X-Enhancer-Engine-Label`
+- `X-Enhancer-Preset`
+
+If you need the old data-URL shape from this endpoint, pass `response_format=data_url`.
 
 Base64 JSON endpoint:
 
@@ -107,6 +148,11 @@ Content-Type: application/json
 
 `image_base64` can be a full data URL or a raw base64 string.
 
+For protected deployments, send either:
+
+- `X-API-Key: <your key>`
+- `Authorization: Bearer <your key>`
+
 Available presets:
 
 - `product_standard`
@@ -117,6 +163,7 @@ Available engines:
 
 - `studio_product_generative`
 - `studio_product_focus`
+- `studio_product_realesrgan`
 - `studio_product`
 - `realesrgan`
 - `pillow_fallback`
@@ -155,3 +202,7 @@ curl -L -o weights/RealESRGAN_x4plus.pth https://github.com/xinntao/Real-ESRGAN/
 ```
 
 For production, run on a CUDA-capable GPU and keep the fallback path enabled for resilience.
+
+## Notes On Safer Dependencies
+
+The base requirements now remove multipart parsing from the main upload flow, upgrade FastAPI onto a Starlette range that includes the multipart DoS fix line, and pin Pillow at a patched release. The optional Real-ESRGAN requirements also now require patched `requests` and `filelock` versions.

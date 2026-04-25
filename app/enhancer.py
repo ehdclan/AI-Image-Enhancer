@@ -5,6 +5,7 @@ import io
 import importlib.util
 import logging
 import os
+import warnings
 from binascii import Error as BinasciiError
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,7 @@ EngineName = Literal[
     "realesrgan",
     "pillow_fallback",
     "studio_product",
+    "studio_product_realesrgan",
     "studio_product_focus",
     "studio_product_generative",
 ]
@@ -37,6 +39,8 @@ REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 OPENAI_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 OPENAI_IMAGE_SIZE = os.getenv("OPENAI_IMAGE_SIZE", "1024x1024")
 MAX_OUTPUT_LONG_EDGE = _env_int("MAX_OUTPUT_LONG_EDGE", 4096)
+MAX_INPUT_BYTES = _env_int("MAX_INPUT_BYTES", 12_000_000)
+ALLOWED_IMAGE_FORMATS = ("JPEG", "PNG", "WEBP")
 
 
 @dataclass(frozen=True)
@@ -80,13 +84,16 @@ class ProductImageEnhancer:
 
     def __init__(
         self,
+        max_input_bytes: int = MAX_INPUT_BYTES,
         max_input_pixels: int = 24_000_000,
         target_long_edge: int = 1800,
         max_output_long_edge: int = MAX_OUTPUT_LONG_EDGE,
     ) -> None:
+        self.max_input_bytes = max(1, max_input_bytes)
         self.max_input_pixels = max_input_pixels
         self.target_long_edge = max(1, target_long_edge)
         self.max_output_long_edge = max(self.target_long_edge, max_output_long_edge)
+        self.allowed_formats = ALLOWED_IMAGE_FORMATS
         self._realesrgan_status = "Checking Real-ESRGAN runtime."
         self._realesrgan = self._load_realesrgan()
         self._rembg_session = None
@@ -116,6 +123,19 @@ class ProductImageEnhancer:
         elif engine == "studio_product":
             enhanced = self._studio_product_enhance(image, preset)
             engine_label = "Studio product"
+        elif engine == "studio_product_realesrgan":
+            if self._realesrgan is None:
+                self._realesrgan = self._load_realesrgan()
+
+            if self._realesrgan is None:
+                raise ModelUnavailableError(self._realesrgan_status)
+
+            try:
+                enhanced = self._studio_product_realesrgan_enhance(image, preset)
+            except Exception as exc:  # pragma: no cover - optional ML runtime can fail in deployment-specific ways
+                logger.exception("Studio product focus + Real-ESRGAN inference failed")
+                raise ModelRuntimeError("Studio product focus + Real-ESRGAN failed during inference.") from exc
+            engine_label = "Studio product focus + RealESRGAN_x4plus"
         elif engine == "studio_product_focus":
             enhanced = self._studio_product_focus_enhance(image, preset)
             engine_label = "Studio product focus"
@@ -149,6 +169,11 @@ class ProductImageEnhancer:
                 "available": True,
                 "detail": self._studio_engine_detail(),
             },
+            "studio_product_realesrgan": {
+                "label": "Studio product focus + Real-ESRGAN",
+                "available": self._realesrgan is not None,
+                "detail": self._studio_product_realesrgan_detail(),
+            },
             "studio_product_focus": {
                 "label": "Studio product focus",
                 "available": True,
@@ -158,13 +183,11 @@ class ProductImageEnhancer:
                 "label": "Studio product generative",
                 "available": self._is_generative_ready(),
                 "detail": self._generative_engine_detail(),
-                "model": OPENAI_IMAGE_MODEL,
             },
             "realesrgan": {
                 "label": "Real-ESRGAN x4plus",
                 "available": self._realesrgan is not None,
                 "detail": self._realesrgan_status,
-                "model_path": str(REALESRGAN_MODEL_PATH),
             },
         }
 
@@ -172,12 +195,29 @@ class ProductImageEnhancer:
         if not file_bytes:
             raise ImageEnhancementError("Upload an image before enhancing.")
 
+        if len(file_bytes) > self.max_input_bytes:
+            raise ImageEnhancementError(
+                f"Image is too large. Use a file under {self.max_input_bytes // 1_000_000} MB."
+            )
+
         try:
-            image = Image.open(io.BytesIO(file_bytes))
-            image = ImageOps.exif_transpose(image)
-            image.load()
-        except (UnidentifiedImageError, OSError) as exc:
-            raise ImageEnhancementError("The uploaded file is not a readable image.") from exc
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                image = Image.open(io.BytesIO(file_bytes), formats=self.allowed_formats)
+                if image.width * image.height > self.max_input_pixels:
+                    raise ImageEnhancementError("Image is too large. Use a file under 24 megapixels.")
+
+                image = ImageOps.exif_transpose(image)
+                if image.width * image.height > self.max_input_pixels:
+                    raise ImageEnhancementError("Image is too large. Use a file under 24 megapixels.")
+
+                image.load()
+        except Image.DecompressionBombError as exc:
+            raise ImageEnhancementError("Image is too large. Use a file under 24 megapixels.") from exc
+        except Image.DecompressionBombWarning as exc:
+            raise ImageEnhancementError("Image is too large. Use a file under 24 megapixels.") from exc
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            raise ImageEnhancementError("Upload a readable JPEG, PNG, or WebP image.") from exc
 
         if image.width * image.height > self.max_input_pixels:
             raise ImageEnhancementError("Image is too large. Use a file under 24 megapixels.")
@@ -195,8 +235,7 @@ class ProductImageEnhancer:
     def _load_realesrgan(self):
         if not REALESRGAN_MODEL_PATH.exists():
             self._realesrgan_status = (
-                f"Model weights not found at {REALESRGAN_MODEL_PATH}. "
-                "Install the Real-ESRGAN extras and download RealESRGAN_x4plus.pth."
+                "Model weights not found. Install the Real-ESRGAN extras and add RealESRGAN_x4plus.pth."
             )
             return None
 
@@ -232,10 +271,10 @@ class ProductImageEnhancer:
                 half=device == "cuda",
                 device=device,
             )
-            self._realesrgan_status = f"Ready on {device} with {REALESRGAN_MODEL_PATH}."
+            self._realesrgan_status = f"Ready on {device}."
             return upsampler
         except Exception as exc:
-            self._realesrgan_status = f"Real-ESRGAN could not initialize: {exc}"
+            self._realesrgan_status = "Real-ESRGAN could not initialize."
             logger.info("Real-ESRGAN is not ready: %s", exc)
             return None
 
@@ -315,6 +354,10 @@ class ProductImageEnhancer:
         canvas.paste(crop, (crop_x, crop_y), crop_mask)
         return canvas.convert("RGB")
 
+    def _studio_product_realesrgan_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        studio_image = self._studio_product_focus_enhance(image, preset)
+        return self._enhance_with_realesrgan(studio_image, preset)
+
     def _studio_product_focus_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         mask = self._segment_product_mask(image)
         if mask is None:
@@ -370,6 +413,15 @@ class ProductImageEnhancer:
 
         return "Ready with full-scene fallback polish. Install rembg for product-only focus."
 
+    def _studio_product_realesrgan_detail(self) -> str:
+        if self._realesrgan is None:
+            return f"Not ready. {self._realesrgan_status}"
+
+        return (
+            "Ready. Runs studio_product_focus first to enhance the product while keeping the original scene, "
+            "then applies Real-ESRGAN restoration for rough or low-quality source images."
+        )
+
     def _is_generative_ready(self) -> bool:
         return bool(os.getenv("OPENAI_API_KEY")) and importlib.util.find_spec("openai") is not None
 
@@ -381,8 +433,8 @@ class ProductImageEnhancer:
             return "Not ready. Set OPENAI_API_KEY to enable the controlled generative studio-photo pass."
 
         return (
-            f"Ready with OpenAI {OPENAI_IMAGE_MODEL}. Uses a constrained prompt after studio_product "
-            "to preserve the product while improving lighting, background, and camera finish."
+            "Ready with a constrained generative edit pass after studio_product to preserve the product while "
+            "improving lighting, background, and camera finish."
         )
 
     def _enhance_with_openai_image_edit(self, reference: Image.Image) -> Image.Image:

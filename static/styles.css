@@ -144,13 +144,18 @@ h1 {
   font-weight: 700;
 }
 
-select {
+select,
+.field input {
   min-height: 46px;
   padding: 0 12px;
   color: var(--ink);
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.field input::placeholder {
+  color: #8a938e;
 }
 
 .button {
@@ -243,10 +248,6 @@ select {
   block-size: 100%;
   max-height: 640px;
   object-fit: contain;
-}
-
-.sample {
-  object-fit: cover;
 }
 
 .empty-state {
