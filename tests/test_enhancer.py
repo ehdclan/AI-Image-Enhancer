@@ -69,6 +69,64 @@ class StudioProductRegressionTests(unittest.TestCase):
         self.assertEqual(enhancer.calls, ["decode", "studio_product_focus", "realesrgan", "encode"])
         self.assertEqual(result.engine, "studio_product_realesrgan")
 
+    def test_ultra_upscale_runs_restore_pipeline(self) -> None:
+        class UltraTrackingEnhancer(ProductImageEnhancer):
+            def __init__(self) -> None:
+                super().__init__()
+                self._realesrgan = object()
+                self.calls: list[str] = []
+
+            def _decode(self, file_bytes: bytes) -> Image.Image:
+                self.calls.append("decode")
+                return Image.new("RGB", (128, 96), (245, 244, 242))
+
+            def _ultra_upscale_profile(self, image: Image.Image) -> str:
+                self.calls.append("profile")
+                return "product"
+
+            def _prepare_ultra_upscale_source(self, image: Image.Image, profile: str) -> Image.Image:
+                self.calls.append(f"prepare:{profile}")
+                return image
+
+            def _ultra_upscale_target_long_edge(self, image: Image.Image, profile: str) -> int:
+                self.calls.append(f"target:{profile}")
+                return 512
+
+            def _run_realesrgan_raw(self, image: Image.Image, outscale: int) -> Image.Image:
+                self.calls.append(f"realesrgan:{outscale}")
+                return Image.new("RGB", (512, 384), (255, 255, 255))
+
+            def _ultra_upscale_refine(
+                self,
+                restored: Image.Image,
+                baseline: Image.Image,
+                preset: str,
+                profile: str,
+            ) -> Image.Image:
+                self.calls.append(f"refine:{profile}:{restored.size}:{baseline.size}")
+                return restored
+
+            def _encode(self, image: Image.Image) -> bytes:
+                self.calls.append("encode")
+                return b"jpeg"
+
+        enhancer = UltraTrackingEnhancer()
+        result = enhancer.enhance(b"raw", preset="product_standard", engine="ultra_upscale")
+
+        self.assertEqual(
+            enhancer.calls,
+            [
+                "decode",
+                "profile",
+                "prepare:product",
+                "target:product",
+                "realesrgan:4",
+                "refine:product:(512, 384):(512, 384)",
+                "encode",
+            ],
+        )
+        self.assertEqual(result.engine, "ultra_upscale")
+
 
 if __name__ == "__main__":
     unittest.main()

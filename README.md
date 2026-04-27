@@ -7,7 +7,7 @@ A focused image enhancement component for e-commerce inventory photos. It expose
 The component is built around a conservative enhancement pipeline:
 
 1. Validate and normalize uploads.
-2. Let the caller choose `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`.
+2. Let the caller choose `ultra_upscale`, `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`.
 3. Use deterministic enhancement paths by default so product details stay faithful.
 4. Return a catalog-ready JPEG, with binary responses as the default transport.
 
@@ -39,6 +39,18 @@ export CORS_ALLOW_ORIGINS=https://your-frontend.example
 Real-ESRGAN is primarily a super-resolution and restoration model. It is most visible on low-resolution, compressed, noisy, or slightly blurry uploads. If the source image is already clean and close to the target output size, the difference can be subtle, especially when both images are displayed at browser size.
 
 This project adds a conservative product-image polish after Real-ESRGAN: color-safe autocontrast, light sharpening, and mild tone adjustment. It intentionally avoids heavy edits that could change product details.
+
+## Ultra Upscale Mode
+
+`ultra_upscale` is the closest thing in this project to a Picsart-style restore-and-enlarge engine. It keeps the full scene, cleans the source first, runs Real-ESRGAN at a larger target size, and then blends the restored result back toward a resized baseline to keep logos, labels, and product textures stable.
+
+It also routes the image through lightweight heuristics:
+
+- `graphics`: flatter colors and sharper edges, less denoise
+- `product`: stronger fidelity blend for store images
+- `portrait`: softer cleanup before the upscale pass
+
+The target output size scales more aggressively than the plain `realesrgan` engine, so rough low-resolution uploads can get a visibly larger result while still respecting `MAX_OUTPUT_LONG_EDGE`.
 
 ## Studio Product Mode
 
@@ -81,7 +93,7 @@ A standalone Colab notebook is available at:
 notebooks/image_enhancer_colab.ipynb
 ```
 
-It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before and after images, and produces an API-style base64 response.
+It installs the inference stack, downloads `RealESRGAN_x4plus.pth`, lets you upload an image, choose `ultra_upscale`, `studio_product_focus`, `studio_product_realesrgan`, `studio_product`, `realesrgan`, or `pillow_fallback`, compares before and after images, and produces an API-style base64 response.
 
 ## API
 
@@ -142,6 +154,7 @@ Available presets:
 
 Available engines:
 
+- `ultra_upscale`
 - `studio_product_focus`
 - `studio_product_realesrgan`
 - `studio_product`

@@ -24,6 +24,7 @@ def _env_int(name: str, default: int) -> int:
 PresetName = Literal["product_standard", "product_detail", "product_soft"]
 EngineName = Literal[
     "realesrgan",
+    "ultra_upscale",
     "pillow_fallback",
     "studio_product",
     "studio_product_realesrgan",
@@ -115,6 +116,19 @@ class ProductImageEnhancer:
                 logger.exception("Real-ESRGAN inference failed")
                 raise ModelRuntimeError("Real-ESRGAN failed during inference.") from exc
             engine_label = "RealESRGAN_x4plus"
+        elif engine == "ultra_upscale":
+            if self._realesrgan is None:
+                self._realesrgan = self._load_realesrgan()
+
+            if self._realesrgan is None:
+                raise ModelUnavailableError(self._realesrgan_status)
+
+            try:
+                enhanced = self._ultra_upscale_enhance(image, preset)
+            except Exception as exc:  # pragma: no cover - optional ML runtime can fail in deployment-specific ways
+                logger.exception("Ultra upscale inference failed")
+                raise ModelRuntimeError("Ultra upscale failed during inference.") from exc
+            engine_label = "Ultra upscale"
         elif engine == "studio_product":
             enhanced = self._studio_product_enhance(image, preset)
             engine_label = "Studio product"
@@ -155,6 +169,11 @@ class ProductImageEnhancer:
                 "label": "Pillow fallback",
                 "available": True,
                 "detail": "Ready. Uses deterministic resizing, contrast, denoise, and sharpening.",
+            },
+            "ultra_upscale": {
+                "label": "Ultra upscale",
+                "available": self._realesrgan is not None,
+                "detail": self._ultra_upscale_detail(),
             },
             "studio_product": {
                 "label": "Studio product",
@@ -266,15 +285,29 @@ class ProductImageEnhancer:
             return None
 
     def _enhance_with_realesrgan(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        enhanced = self._run_realesrgan_raw(image, outscale=2)
+        enhanced = self._fit_long_edge(enhanced, self._output_long_edge_for(image))
+        return self._final_polish(enhanced, preset, denoise=False, strength="model")
+
+    def _run_realesrgan_raw(self, image: Image.Image, outscale: int) -> Image.Image:
         import numpy as np
 
         rgb = np.array(image)
         bgr = rgb[:, :, ::-1]
-        output_bgr, _ = self._realesrgan.enhance(bgr, outscale=2)
+        output_bgr, _ = self._realesrgan.enhance(bgr, outscale=outscale)
         output_rgb = output_bgr[:, :, ::-1]
-        enhanced = Image.fromarray(output_rgb)
-        enhanced = self._fit_long_edge(enhanced, self._output_long_edge_for(image))
-        return self._final_polish(enhanced, preset, denoise=False, strength="model")
+        return Image.fromarray(output_rgb)
+
+    def _ultra_upscale_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
+        profile = self._ultra_upscale_profile(image)
+        prepared = self._prepare_ultra_upscale_source(image, profile)
+        target_long_edge = self._ultra_upscale_target_long_edge(image, profile)
+        outscale = 4 if target_long_edge >= max(image.size) * 2.6 else 2
+
+        restored = self._run_realesrgan_raw(prepared, outscale=outscale)
+        restored = self._fit_long_edge(restored, target_long_edge)
+        baseline = self._fit_long_edge(image, target_long_edge)
+        return self._ultra_upscale_refine(restored, baseline, preset, profile)
 
     def _fallback_enhance(self, image: Image.Image, preset: PresetName) -> Image.Image:
         image = self._fit_long_edge(image, self._output_long_edge_for(image))
@@ -387,6 +420,117 @@ class ProductImageEnhancer:
             "Ready. Runs studio_product_focus first to enhance the product while keeping the original scene, "
             "then applies Real-ESRGAN restoration for rough or low-quality source images."
         )
+
+    def _ultra_upscale_detail(self) -> str:
+        if self._realesrgan is None:
+            return f"Not ready. {self._realesrgan_status}"
+
+        return (
+            "Ready. Uses a restoration-first upscale pass with noise cleanup, larger target sizing, "
+            "and fidelity blending to keep product details stable."
+        )
+
+    def _ultra_upscale_profile(self, image: Image.Image) -> Literal["product", "portrait", "graphics"]:
+        work = ImageOps.contain(image.convert("RGB"), (192, 192), method=Image.Resampling.BOX)
+        colors = work.getcolors(maxcolors=192 * 192) or []
+        unique_ratio = len(colors) / max(1, work.width * work.height)
+
+        edges = ImageOps.grayscale(work).filter(ImageFilter.FIND_EDGES)
+        edge_strength = ImageStat.Stat(edges).mean[0] / 255
+
+        if unique_ratio < 0.18 and edge_strength > 0.09:
+            return "graphics"
+
+        mask = self._segment_product_mask(image)
+        if mask is not None:
+            stats = self._mask_stats(mask, image.size)
+            if stats is not None and 0.04 <= stats.coverage <= 0.72:
+                return "product"
+
+        return "portrait"
+
+    def _prepare_ultra_upscale_source(
+        self,
+        image: Image.Image,
+        profile: Literal["product", "portrait", "graphics"],
+    ) -> Image.Image:
+        image = image.convert("RGB")
+        if profile == "graphics":
+            image = ImageOps.autocontrast(image, cutoff=0.4)
+            return ImageEnhance.Contrast(image).enhance(1.04)
+
+        median = image.filter(ImageFilter.MedianFilter(size=3))
+        blend = 0.14 if profile == "product" else 0.18
+        image = Image.blend(image, median, blend)
+
+        if profile == "portrait":
+            softened = image.filter(ImageFilter.GaussianBlur(radius=0.35))
+            image = Image.blend(image, softened, 0.08)
+
+        image = ImageEnhance.Contrast(image).enhance(1.02)
+        image = ImageEnhance.Color(image).enhance(1.01)
+        return image
+
+    def _ultra_upscale_target_long_edge(
+        self,
+        image: Image.Image,
+        profile: Literal["product", "portrait", "graphics"],
+    ) -> int:
+        long_edge = max(image.size)
+        detail_score = self._detail_score(image)
+
+        if long_edge <= 900 or detail_score < 0.12:
+            factor = 4.0
+        elif long_edge <= 1400 or detail_score < 0.18:
+            factor = 3.0
+        else:
+            factor = 2.0
+
+        if profile == "graphics":
+            factor = min(factor, 3.0)
+        elif profile == "portrait" and factor == 4.0:
+            factor = 3.0
+
+        desired = max(self.target_long_edge, round(long_edge * factor))
+        return min(desired, self.max_output_long_edge)
+
+    def _detail_score(self, image: Image.Image) -> float:
+        work = ImageOps.contain(ImageOps.grayscale(image), (256, 256), method=Image.Resampling.BOX)
+        edges = work.filter(ImageFilter.FIND_EDGES)
+        edge_strength = ImageStat.Stat(edges).mean[0] / 255
+        contrast = ImageStat.Stat(work).stddev[0] / 255
+        return edge_strength * 0.7 + contrast * 0.3
+
+    def _ultra_upscale_refine(
+        self,
+        restored: Image.Image,
+        baseline: Image.Image,
+        preset: PresetName,
+        profile: Literal["product", "portrait", "graphics"],
+    ) -> Image.Image:
+        if profile == "graphics":
+            blend_alpha = 0.7
+        elif profile == "product":
+            blend_alpha = 0.82
+        else:
+            blend_alpha = 0.88
+
+        if preset == "product_detail":
+            blend_alpha += 0.04
+        elif preset == "product_soft":
+            blend_alpha -= 0.05
+
+        blend_alpha = min(0.94, max(0.62, blend_alpha))
+        refined = Image.blend(baseline.convert("RGB"), restored.convert("RGB"), blend_alpha)
+
+        if profile == "graphics":
+            refined = ImageEnhance.Contrast(refined).enhance(1.03)
+            return refined.filter(ImageFilter.UnsharpMask(radius=0.45, percent=110, threshold=2))
+
+        polished = self._final_polish(refined, preset, denoise=False, strength="model")
+        if profile == "product":
+            polished = Image.blend(baseline.convert("RGB"), polished, 0.9)
+        return polished
 
     def _segment_product_mask(self, image: Image.Image) -> Optional[Image.Image]:
         mask = self._build_rembg_product_mask(image)

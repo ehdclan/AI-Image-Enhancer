@@ -90,6 +90,8 @@ const loadEngineStatus = async () => {
     engines = payload;
     if (engines.studio_product?.available) {
       engine.value = "studio_product";
+    } else if (engines.ultra_upscale?.available) {
+      engine.value = "ultra_upscale";
     } else if (engines.studio_product_realesrgan?.available) {
       engine.value = "studio_product_realesrgan";
     } else if (engines.realesrgan?.available) {
