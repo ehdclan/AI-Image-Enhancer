@@ -47,6 +47,7 @@ class SecuritySettings:
     api_key: str | None
     allow_loopback_without_api_key: bool
     public_demo_enabled: bool
+    demo_as_root: bool
     allowed_origins: tuple[str, ...]
     max_input_bytes: int
     max_base64_chars: int
@@ -61,6 +62,7 @@ def load_security_settings() -> SecuritySettings:
         api_key=os.getenv("ENHANCER_API_KEY") or None,
         allow_loopback_without_api_key=_env_bool("ALLOW_LOOPBACK_WITHOUT_API_KEY", True),
         public_demo_enabled=_env_bool("PUBLIC_DEMO_ENABLED", True),
+        demo_as_root=_env_bool("DEMO_AS_ROOT", False),
         allowed_origins=_env_csv("CORS_ALLOW_ORIGINS"),
         max_input_bytes=max_input_bytes,
         max_base64_chars=_base64_char_limit(max_input_bytes),

@@ -12,6 +12,8 @@ services:
         value: 3.11.11
       - key: PUBLIC_DEMO_ENABLED
         value: "true"
+      - key: DEMO_AS_ROOT
+        value: "true"
       - key: MAX_CONCURRENT_JOBS
         value: "1"
       - key: RATE_LIMIT_REQUESTS

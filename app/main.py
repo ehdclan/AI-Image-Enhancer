@@ -8,7 +8,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -60,7 +60,9 @@ def create_app(security_settings: SecuritySettings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     @app.get("/")
-    def index() -> FileResponse:
+    def index() -> Response:
+        if settings.demo_as_root:
+            return RedirectResponse(url="/demo/ai-image-enhancer", status_code=307)
         return FileResponse("static/index.html")
 
     @app.get("/demo/ai-image-enhancer")
