@@ -46,6 +46,7 @@ def _base64_char_limit(max_input_bytes: int) -> int:
 class SecuritySettings:
     api_key: str | None
     allow_loopback_without_api_key: bool
+    public_demo_enabled: bool
     allowed_origins: tuple[str, ...]
     max_input_bytes: int
     max_base64_chars: int
@@ -59,6 +60,7 @@ def load_security_settings() -> SecuritySettings:
     return SecuritySettings(
         api_key=os.getenv("ENHANCER_API_KEY") or None,
         allow_loopback_without_api_key=_env_bool("ALLOW_LOOPBACK_WITHOUT_API_KEY", True),
+        public_demo_enabled=_env_bool("PUBLIC_DEMO_ENABLED", True),
         allowed_origins=_env_csv("CORS_ALLOW_ORIGINS"),
         max_input_bytes=max_input_bytes,
         max_base64_chars=_base64_char_limit(max_input_bytes),
@@ -176,12 +178,15 @@ class EdgeGuardMiddleware:
         return "range" in headers and (path == "/" or path.startswith("/static/"))
 
     def _is_protected_api(self, path: str) -> bool:
-        return path in {"/api/enhance", "/api/enhance/base64", "/api/engines"}
+        return path in {"/api/enhance", "/api/enhance/base64", "/api/engines", "/demo/api/enhance"}
 
     def _is_body_limited_path(self, path: str) -> bool:
-        return path in {"/api/enhance", "/api/enhance/base64"}
+        return path in {"/api/enhance", "/api/enhance/base64", "/demo/api/enhance"}
 
     def _authorize(self, headers: Headers, scope: Scope) -> Response | None:
+        if self.settings.public_demo_enabled and scope.get("path") == "/demo/api/enhance":
+            return None
+
         if self.settings.api_key:
             presented = headers.get("x-api-key") or self._bearer_token(headers)
             if presented and hmac.compare_digest(presented, self.settings.api_key):

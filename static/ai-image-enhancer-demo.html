@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Image Enhancer Demo</title>
+    <link rel="stylesheet" href="/static/ai-image-enhancer-demo.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="topbar">
+        <div class="nav-left">
+          <a class="brand" href="/demo/ai-image-enhancer">eHd</a>
+        </div>
+      </header>
+
+      <div class="divider" aria-hidden="true"></div>
+
+      <section class="hero-copy">
+        <p class="eyebrow">AI Image Enhancer</p>
+        <h1>AI Image Enhancer</h1>
+      </section>
+
+      <section class="hero-stage">
+        <div class="compare-stage-shell">
+          <div class="compare-stage" id="compare-stage">
+            <!-- <img
+              id="compare-before-image"
+              class="compare-image"
+              src=""
+              alt=""
+            /> -->
+
+            <div class="compare-after-layer" id="compare-after-layer">
+              <!-- <img
+                id="compare-after-image"
+                class="compare-image"
+                src=""
+                alt=""
+              /> -->
+            </div>
+
+            <div class="compare-divider" id="compare-divider" aria-hidden="true">
+              <button
+                class="compare-handle"
+                id="compare-handle"
+                type="button"
+                aria-label="Drag to compare before and after"
+              >
+                <span>↔</span>
+              </button>
+            </div>
+
+            <div class="compare-label compare-label-before">After</div>
+            <div class="compare-label compare-label-after">Before</div>
+
+            <div class="progress-overlay hidden" id="demo-progress-overlay" aria-hidden="true">
+              <div class="spinner-shell">
+                <div class="progress-ring" id="demo-progress-ring" style="--progress: 0%;">
+                  <span id="demo-progress-value">0%</span>
+                </div>
+                <div class="progress-copy">
+                  <strong>Enhancing image</strong>
+                  <span>Estimated progress while processing</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="compare-meta">
+            <span id="demo-original-meta">Original</span>
+            <span id="demo-enhanced-meta">Enhanced</span>
+          </div>
+        </div>
+
+        <aside class="enhancer-card" id="enhancer-card">
+          <!-- <div class="mini-compare-row">
+            <figure class="mini-card">
+              <img src="/static/demo-assets/sample-before-1.jpg" alt="Mini original sample" />
+              <figcaption>Before</figcaption>
+            </figure>
+            <figure class="mini-card">
+              <img src="/static/demo-assets/sample-after-1.jpg" alt="Mini enhanced sample" />
+              <figcaption>After</figcaption>
+            </figure>
+          </div> -->
+
+          <form class="upload-form" id="demo-enhance-form">
+            <label class="dropzone" for="demo-image-input">
+              <input id="demo-image-input" type="file" accept="image/jpeg,image/png,image/webp" />
+              <span class="primary-button">Browse files</span>
+              <span class="dropzone-text">
+                Drop, paste or
+                <button class="inline-link" id="demo-url-trigger" type="button">add a URL</button>
+              </span>
+            </label>
+
+            <div class="url-panel hidden" id="demo-url-panel">
+              <input
+                id="demo-url-input"
+                type="url"
+                inputmode="url"
+                placeholder="https://example.com/product-image.jpg"
+              />
+              <button class="url-submit-button" type="button" id="demo-load-url">Load URL</button>
+            </div>
+
+            <button class="enhance-button" type="submit" id="demo-enhance-button">
+              Enhance image
+            </button>
+          </form>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/static/ai-image-enhancer-demo.js" type="module"></script>
+  </body>
+</html>

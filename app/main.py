@@ -63,6 +63,10 @@ def create_app(security_settings: SecuritySettings | None = None) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse("static/index.html")
 
+    @app.get("/demo/ai-image-enhancer")
+    def demo_ai_image_enhancer() -> FileResponse:
+        return FileResponse("static/ai-image-enhancer-demo.html")
+
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -88,6 +92,22 @@ def create_app(security_settings: SecuritySettings | None = None) -> FastAPI:
         if response_format == "data_url":
             return _result_to_data_url_response(result)
 
+        return _result_to_binary_response(result)
+
+    @app.post("/demo/api/enhance")
+    async def demo_enhance_image(request: Request) -> Response:
+        content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Send the uploaded file as a raw image request body.")
+
+        file_bytes = await _read_request_bytes(request)
+        result = await _enhance_bytes(
+            enhancer,
+            app.state.enhancement_slots,
+            file_bytes,
+            preset="product_detail",
+            engine="studio_product_focus",
+        )
         return _result_to_binary_response(result)
 
     @app.post("/api/enhance/base64")
