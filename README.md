@@ -85,6 +85,53 @@ Open locally:
 http://127.0.0.1:8000
 ```
 
+## Deploy To Render
+
+This repo is set up to deploy the public demo on Render using the included
+`render.yaml`.
+
+The intended public entrypoint is:
+
+```text
+/demo/ai-image-enhancer
+```
+
+### Recommended shape
+
+- Use the included Render Blueprint for the demo web service.
+- Keep the public demo pinned to `studio_product_focus`.
+- Let the public demo use `/demo/api/enhance`; the main `/api/*` routes remain
+  protected.
+
+### One-time setup
+
+1. Push the latest `main` branch to GitHub.
+2. In Render, choose **New +** -> **Blueprint**.
+3. Point Render at this repository.
+4. Confirm the generated web service from `render.yaml`.
+5. Deploy.
+
+Render will provision a URL like:
+
+```text
+https://your-service-name.onrender.com
+```
+
+Your demo page will then be available at:
+
+```text
+https://your-service-name.onrender.com/demo/ai-image-enhancer
+```
+
+### Notes for this demo
+
+- The service starts with a built-in default sample (`mj.JPG`) so the slider is
+  usable before an upload.
+- The first few enhancement requests after a fresh deploy can be slower because
+  `rembg` may need to initialize its segmentation model.
+- The Render Blueprint currently uses the `free` plan and a single concurrent
+  enhancement slot for a steadier CPU-bound demo experience.
+
 ## Google Colab Notebook
 
 A standalone Colab notebook is available at:
