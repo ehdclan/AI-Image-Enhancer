@@ -6,10 +6,6 @@ const DEFAULT_AFTER_SRC = "/static/demo-assets/mj-enhanced.jpg";
 const form = document.querySelector("#demo-enhance-form");
 const input = document.querySelector("#demo-image-input");
 const dropzone = document.querySelector(".dropzone");
-const urlPanel = document.querySelector("#demo-url-panel");
-const urlInput = document.querySelector("#demo-url-input");
-const urlTrigger = document.querySelector("#demo-url-trigger");
-const loadUrlButton = document.querySelector("#demo-load-url");
 const enhanceButton = document.querySelector("#demo-enhance-button");
 const originalMeta = document.querySelector("#demo-original-meta");
 const enhancedMeta = document.querySelector("#demo-enhanced-meta");
@@ -299,43 +295,6 @@ function loadDefaultPreview() {
   setCompareRatio(0.5);
 }
 
-async function loadFromUrl() {
-  if (!urlInput || !loadUrlButton || !urlPanel) {
-    return;
-  }
-
-  const value = urlInput.value.trim();
-  if (!value) {
-    setStatus("Paste a direct image URL before loading.", true);
-    return;
-  }
-
-  loadUrlButton.disabled = true;
-  setStatus("Loading image from URL...");
-
-  try {
-    const response = await fetch(value);
-    if (!response.ok) {
-      throw new Error("Could not fetch that image URL.");
-    }
-
-    const blob = await response.blob();
-    const type = blob.type.toLowerCase();
-    if (!allowedMimeTypes.has(type)) {
-      throw new Error("Use a direct JPEG, PNG, or WebP image URL.");
-    }
-
-    const fileName = value.split("/").pop() || "remote-image";
-    const file = new File([blob], fileName, { type });
-    setSelectedFile(file);
-    urlPanel.classList.add("hidden");
-  } catch (error) {
-    setStatus(error.message || "Could not load that image URL.", true);
-  } finally {
-    loadUrlButton.disabled = false;
-  }
-}
-
 function enhanceImage() {
   if (!selectedFile || !enhanceButton || !afterImage) {
     setStatus("Choose an image first.", true);
@@ -469,23 +428,6 @@ if (input) {
   });
 }
 
-if (urlTrigger) {
-  urlTrigger.addEventListener("click", () => {
-    if (!urlPanel || !urlInput) {
-      return;
-    }
-
-    urlPanel.classList.toggle("hidden");
-    if (!urlPanel.classList.contains("hidden")) {
-      urlInput.focus();
-    }
-  });
-}
-
-if (loadUrlButton) {
-  loadUrlButton.addEventListener("click", loadFromUrl);
-}
-
 if (dropzone) {
   for (const eventName of ["dragenter", "dragover"]) {
     dropzone.addEventListener(eventName, (event) => {
@@ -517,7 +459,7 @@ if (dropzone) {
   });
 }
 
-window.addEventListener("paste", async (event) => {
+window.addEventListener("paste", (event) => {
   const imageItem = Array.from(event.clipboardData?.items || []).find((item) =>
     item.type.startsWith("image/")
   );
@@ -528,17 +470,7 @@ window.addEventListener("paste", async (event) => {
       setSelectedFile(file);
       setStatus("Image pasted from clipboard. Ready to enhance.");
     }
-    return;
   }
-
-  const text = event.clipboardData?.getData("text/plain")?.trim();
-  if (!text || !/^https?:\/\//i.test(text) || !urlInput || !urlPanel) {
-    return;
-  }
-
-  urlInput.value = text;
-  urlPanel.classList.remove("hidden");
-  await loadFromUrl();
 });
 
 if (form) {
