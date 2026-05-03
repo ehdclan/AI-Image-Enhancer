@@ -6,6 +6,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -32,6 +33,8 @@ EngineName = Literal[
 ]
 
 REALESRGAN_MODEL_PATH = Path(os.getenv("REALESRGAN_MODEL_PATH", "weights/RealESRGAN_x4plus.pth"))
+REALESRGAN_ONNX_MODEL_PATH = Path(os.getenv("REALESRGAN_ONNX_MODEL_PATH", "weights/RealESRGAN_x4plus.onnx"))
+REALESRGAN_BACKEND = os.getenv("REALESRGAN_BACKEND", "auto").strip().lower()
 REMBG_MODEL_DIR = Path(os.getenv("REMBG_MODEL_DIR", "weights/rembg"))
 REMBG_MODEL_NAME = os.getenv("REMBG_MODEL_NAME", "isnet-general-use")
 MAX_OUTPUT_LONG_EDGE = _env_int("MAX_OUTPUT_LONG_EDGE", 4096)
@@ -68,6 +71,111 @@ class ModelUnavailableError(RuntimeError):
 
 class ModelRuntimeError(RuntimeError):
     """Raised when a configured model fails during inference."""
+
+
+def _apply_torch_pytree_compat() -> None:
+    try:
+        import torch.utils._pytree as pytree
+    except Exception:
+        return
+
+    if hasattr(pytree, "register_pytree_node") or not hasattr(pytree, "_register_pytree_node"):
+        return
+
+    def compat_register_pytree_node(cls, flatten_fn, unflatten_fn, *args, **kwargs):
+        return pytree._register_pytree_node(cls, flatten_fn, unflatten_fn)
+
+    pytree.register_pytree_node = compat_register_pytree_node
+
+
+class _OnnxRealEsrganUpsampler:
+    def __init__(self, model_path: Path, tile: int = 256, tile_pad: int = 10, scale: int = 4) -> None:
+        import onnxruntime as ort
+
+        available_providers = ort.get_available_providers()
+        preferred = [
+            provider
+            for provider in ("CUDAExecutionProvider", "CPUExecutionProvider", "CoreMLExecutionProvider")
+            if provider in available_providers
+        ]
+        if not preferred:
+            preferred = available_providers
+
+        self.scale = scale
+        self.tile = tile
+        self.tile_pad = tile_pad
+        self.session = ort.InferenceSession(str(model_path), providers=preferred)
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
+        self.providers = list(self.session.get_providers())
+
+    def enhance(self, img_bgr, outscale: int = 4):
+        import cv2
+
+        if self.tile and self.tile > 0:
+            output_bgr = self._enhance_tiled(img_bgr)
+        else:
+            output_bgr = self._run_model(img_bgr)
+
+        if outscale != self.scale:
+            target_width = max(1, round(img_bgr.shape[1] * outscale))
+            target_height = max(1, round(img_bgr.shape[0] * outscale))
+            output_bgr = cv2.resize(output_bgr, (target_width, target_height), interpolation=cv2.INTER_LANCZOS4)
+
+        return output_bgr, "onnx"
+
+    def _run_model(self, img_bgr):
+        import numpy as np
+
+        input_rgb = img_bgr[:, :, ::-1].astype(np.float32) / 255.0
+        input_tensor = np.transpose(input_rgb, (2, 0, 1))[None, :, :, :]
+        output = self.session.run([self.output_name], {self.input_name: input_tensor})[0]
+        output = np.squeeze(output, axis=0)
+        output = np.transpose(output, (1, 2, 0))
+        output = np.clip(output, 0.0, 1.0)
+        output_rgb = np.round(output * 255.0).astype(np.uint8)
+        return output_rgb[:, :, ::-1]
+
+    def _enhance_tiled(self, img_bgr):
+        import numpy as np
+
+        height, width = img_bgr.shape[:2]
+        tiles_x = ceil(width / self.tile)
+        tiles_y = ceil(height / self.tile)
+        output = np.zeros((height * self.scale, width * self.scale, 3), dtype=np.uint8)
+
+        for tile_y in range(tiles_y):
+            for tile_x in range(tiles_x):
+                input_start_x = tile_x * self.tile
+                input_end_x = min(input_start_x + self.tile, width)
+                input_start_y = tile_y * self.tile
+                input_end_y = min(input_start_y + self.tile, height)
+
+                input_start_x_pad = max(input_start_x - self.tile_pad, 0)
+                input_end_x_pad = min(input_end_x + self.tile_pad, width)
+                input_start_y_pad = max(input_start_y - self.tile_pad, 0)
+                input_end_y_pad = min(input_end_y + self.tile_pad, height)
+
+                input_tile = img_bgr[input_start_y_pad:input_end_y_pad, input_start_x_pad:input_end_x_pad, :]
+                output_tile = self._run_model(input_tile)
+
+                output_start_x = input_start_x * self.scale
+                output_end_x = input_end_x * self.scale
+                output_start_y = input_start_y * self.scale
+                output_end_y = input_end_y * self.scale
+
+                output_start_x_tile = (input_start_x - input_start_x_pad) * self.scale
+                output_end_x_tile = output_start_x_tile + (input_end_x - input_start_x) * self.scale
+                output_start_y_tile = (input_start_y - input_start_y_pad) * self.scale
+                output_end_y_tile = output_start_y_tile + (input_end_y - input_start_y) * self.scale
+
+                output[output_start_y:output_end_y, output_start_x:output_end_x, :] = output_tile[
+                    output_start_y_tile:output_end_y_tile,
+                    output_start_x_tile:output_end_x_tile,
+                    :,
+                ]
+
+        return output
 
 
 class ProductImageEnhancer:
@@ -239,14 +347,67 @@ class ProductImageEnhancer:
         return image.convert("RGB")
 
     def _load_realesrgan(self):
-        if not REALESRGAN_MODEL_PATH.exists():
+        preference = self._preferred_realesrgan_backend()
+
+        if preference in {"auto", "onnx"} and self._has_realesrgan_onnx():
+            upsampler = self._load_realesrgan_onnx()
+            if upsampler is not None:
+                return upsampler
+            if preference == "onnx":
+                return None
+
+        if preference in {"auto", "pytorch"} and self._has_realesrgan_weights():
+            upsampler = self._load_realesrgan_pytorch()
+            if upsampler is not None:
+                return upsampler
+            return None
+
+        if preference == "onnx":
+            self._realesrgan_status = (
+                "ONNX model not found. Export RealESRGAN_x4plus.onnx or change REALESRGAN_BACKEND."
+            )
+        elif preference == "pytorch":
             self._realesrgan_status = (
                 "Model weights not found. Install the Real-ESRGAN extras and add RealESRGAN_x4plus.pth."
             )
+        else:
+            self._realesrgan_status = (
+                "No Real-ESRGAN runtime is ready. Add RealESRGAN_x4plus.onnx or install the PyTorch weights and extras."
+            )
+        return None
+
+    def _preferred_realesrgan_backend(self) -> str:
+        if REALESRGAN_BACKEND in {"auto", "onnx", "pytorch"}:
+            return REALESRGAN_BACKEND
+        return "auto"
+
+    def _realesrgan_weights_path(self) -> Path:
+        return REALESRGAN_MODEL_PATH
+
+    def _realesrgan_onnx_path(self) -> Path:
+        return REALESRGAN_ONNX_MODEL_PATH
+
+    def _has_realesrgan_weights(self) -> bool:
+        return self._realesrgan_weights_path().exists()
+
+    def _has_realesrgan_onnx(self) -> bool:
+        return self._realesrgan_onnx_path().exists()
+
+    def _load_realesrgan_onnx(self):
+        try:
+            upsampler = _OnnxRealEsrganUpsampler(self._realesrgan_onnx_path())
+            providers = ", ".join(upsampler.providers) or "unknown provider"
+            self._realesrgan_status = f"Ready on onnxruntime ({providers})."
+            return upsampler
+        except Exception as exc:
+            self._realesrgan_status = "Real-ESRGAN ONNX runtime could not initialize."
+            logger.info("Real-ESRGAN ONNX runtime is not ready: %s", exc)
             return None
 
+    def _load_realesrgan_pytorch(self):
         try:
             import torch
+            _apply_torch_pytree_compat()
             from basicsr.archs.rrdbnet_arch import RRDBNet
             from realesrgan import RealESRGANer
         except Exception as exc:
@@ -269,7 +430,7 @@ class ProductImageEnhancer:
             )
             upsampler = RealESRGANer(
                 scale=4,
-                model_path=str(REALESRGAN_MODEL_PATH),
+                model_path=str(self._realesrgan_weights_path()),
                 model=model,
                 tile=256,
                 tile_pad=10,
@@ -281,7 +442,7 @@ class ProductImageEnhancer:
             return upsampler
         except Exception as exc:
             self._realesrgan_status = "Real-ESRGAN could not initialize."
-            logger.info("Real-ESRGAN is not ready: %s", exc)
+            logger.info("Real-ESRGAN PyTorch runtime is not ready: %s", exc)
             return None
 
     def _enhance_with_realesrgan(self, image: Image.Image, preset: PresetName) -> Image.Image:

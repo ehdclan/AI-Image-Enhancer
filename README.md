@@ -32,6 +32,7 @@ export MAX_CONCURRENT_JOBS=2
 export RATE_LIMIT_REQUESTS=20
 export RATE_LIMIT_WINDOW_SECONDS=60
 export CORS_ALLOW_ORIGINS=https://your-frontend.example
+export REALESRGAN_BACKEND=auto
 ```
 
 ## Why Real-ESRGAN Can Look Subtle
@@ -242,6 +243,37 @@ curl -L -o weights/RealESRGAN_x4plus.pth https://github.com/xinntao/Real-ESRGAN/
 ```
 
 For production, run on a CUDA-capable GPU and keep the fallback path enabled for resilience.
+
+### Optional ONNX export and runtime
+
+If you want a lighter Real-ESRGAN runtime path, this repo can export the current `RealESRGAN_x4plus` checkpoint to ONNX and run it through `onnxruntime`.
+
+Export the model:
+
+```bash
+python scripts/export_realesrgan_onnx.py \
+  --input weights/RealESRGAN_x4plus.pth \
+  --output weights/RealESRGAN_x4plus.onnx
+```
+
+Then choose the backend:
+
+```bash
+export REALESRGAN_BACKEND=onnx
+export REALESRGAN_ONNX_MODEL_PATH=weights/RealESRGAN_x4plus.onnx
+```
+
+Or let the app auto-pick ONNX first and fall back to PyTorch:
+
+```bash
+export REALESRGAN_BACKEND=auto
+```
+
+Notes:
+
+- The ONNX file represents the core `x4` RRDBNet model.
+- The app still handles tiling and final `outscale` resizing around the model call.
+- The current exporter is specifically for `RealESRGAN_x4plus`. `x2plus` needs a slightly different architecture/export path.
 
 ## Notes On Safer Dependencies
 

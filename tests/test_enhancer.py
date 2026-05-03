@@ -127,6 +127,67 @@ class StudioProductRegressionTests(unittest.TestCase):
         )
         self.assertEqual(result.engine, "ultra_upscale")
 
+    def test_realesrgan_prefers_onnx_when_available(self) -> None:
+        class OnnxFirstEnhancer(ProductImageEnhancer):
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                super().__init__()
+
+            def _preferred_realesrgan_backend(self) -> str:
+                return "auto"
+
+            def _has_realesrgan_onnx(self) -> bool:
+                return True
+
+            def _has_realesrgan_weights(self) -> bool:
+                return True
+
+            def _load_realesrgan_onnx(self):
+                self.calls.append("onnx")
+                self._realesrgan_status = "Ready on onnxruntime (CPUExecutionProvider)."
+                return object()
+
+            def _load_realesrgan_pytorch(self):
+                self.calls.append("pytorch")
+                return object()
+
+        enhancer = OnnxFirstEnhancer()
+
+        self.assertEqual(enhancer.calls, ["onnx"])
+        self.assertIsNotNone(enhancer._realesrgan)
+        self.assertIn("onnxruntime", enhancer._realesrgan_status)
+
+    def test_realesrgan_falls_back_to_pytorch_when_onnx_fails(self) -> None:
+        class OnnxFallbackEnhancer(ProductImageEnhancer):
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+                super().__init__()
+
+            def _preferred_realesrgan_backend(self) -> str:
+                return "auto"
+
+            def _has_realesrgan_onnx(self) -> bool:
+                return True
+
+            def _has_realesrgan_weights(self) -> bool:
+                return True
+
+            def _load_realesrgan_onnx(self):
+                self.calls.append("onnx")
+                self._realesrgan_status = "Real-ESRGAN ONNX runtime could not initialize."
+                return None
+
+            def _load_realesrgan_pytorch(self):
+                self.calls.append("pytorch")
+                self._realesrgan_status = "Ready on cpu."
+                return object()
+
+        enhancer = OnnxFallbackEnhancer()
+
+        self.assertEqual(enhancer.calls, ["onnx", "pytorch"])
+        self.assertIsNotNone(enhancer._realesrgan)
+        self.assertEqual(enhancer._realesrgan_status, "Ready on cpu.")
+
 
 if __name__ == "__main__":
     unittest.main()

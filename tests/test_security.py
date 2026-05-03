@@ -14,6 +14,8 @@ def _make_settings(**overrides) -> SecuritySettings:
     values = {
         "api_key": None,
         "allow_loopback_without_api_key": True,
+        "public_demo_enabled": True,
+        "demo_as_root": False,
         "allowed_origins": (),
         "max_input_bytes": 2_000_000,
         "max_base64_chars": 2_667_180,
